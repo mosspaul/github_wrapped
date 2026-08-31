@@ -84,9 +84,9 @@ Resources:
   DbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: >
-        No ingress by design. All access is via the RDS Data API, which does not
-        traverse this security group.
+      # Must be a single-line plain string: EC2 rejects newlines in security
+      # group descriptions, and a YAML folded block (>) appends a trailing one.
+      GroupDescription: 'No ingress by design - all access is via the RDS Data API'
       VpcId: !Ref Vpc
 
   # --- Secrets -------------------------------------------------------------
