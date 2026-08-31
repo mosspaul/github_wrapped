@@ -1,0 +1,6 @@
+# Dependencies every Python function needs.
+#
+# boto3/botocore are NOT listed: they ship with the Lambda Python runtime, and
+# vendoring a second copy adds ~40MB to a bundle for no benefit.
+#
+# Nothing here yet -- shared/db.py and shared/pipeline.py only use boto3.

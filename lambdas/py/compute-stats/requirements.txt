@@ -1,0 +1,2 @@
+-r ../requirements-base.txt
+# Pure SQL against the Data API via boto3 -- nothing to vendor.

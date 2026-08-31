@@ -1,0 +1,104 @@
+/**
+ * Typed client for the wrapped API. Mirrors shared/CONTRACTS.md.
+ *
+ * Written so the real slide UI can be built against it without touching fetch
+ * plumbing -- if you are doing front-end work, start from runWrapped().
+ */
+
+const BASE = import.meta.env.VITE_API_BASE as string | undefined;
+
+if (!BASE) {
+  console.warn('VITE_API_BASE is not set -- copy web/.env.example to web/.env.local');
+}
+
+export type JobStatus =
+  | 'pending'
+  | 'ingesting'
+  | 'computing'
+  | 'generating'
+  | 'ready'
+  | 'error';
+
+export interface StatusResponse {
+  handle: string;
+  status: JobStatus;
+  error: string | null;
+  updatedAt: string;
+}
+
+export interface WrappedUser {
+  handle: string;
+  displayName: string | null;
+  profileImageUrl: string | null;
+  bio: string | null;
+  followers: number;
+  publicRepos: number;
+  accountCreatedAt: string | null;
+}
+
+export interface WrappedSlide {
+  slideType: string;
+  title: string;
+  stats: unknown;
+  html: string | null;
+  generatedAt: string | null;
+}
+
+export interface WrappedPayload {
+  user: WrappedUser;
+  slides: WrappedSlide[];
+}
+
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, init);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export const startWrapped = (handle: string) =>
+  req<{ handle: string; status: JobStatus }>(`/wrapped/${handle}`, { method: 'POST' });
+
+export const getStatus = (handle: string) =>
+  req<StatusResponse>(`/wrapped/${handle}/status`);
+
+export const getWrapped = (handle: string) =>
+  req<WrappedPayload>(`/wrapped/${handle}`);
+
+/** Statuses that mean the pipeline has stopped moving. */
+const TERMINAL: JobStatus[] = ['ready', 'error'];
+
+/**
+ * Kick off a run and poll until it finishes.
+ *
+ * `onProgress` fires on every poll so the UI can show which phase is running --
+ * the pipeline takes 30s+ end to end, so showing nothing is not an option.
+ */
+export async function runWrapped(
+  handle: string,
+  onProgress?: (status: JobStatus) => void,
+  { intervalMs = 2000, timeoutMs = 300_000 }: { intervalMs?: number; timeoutMs?: number } = {},
+): Promise<WrappedPayload> {
+  await startWrapped(handle);
+
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+
+    const status = await getStatus(handle);
+    onProgress?.(status.status);
+
+    if (status.status === 'error') {
+      throw new Error(status.error ?? 'the pipeline failed');
+    }
+    if (status.status === 'ready') {
+      return getWrapped(handle);
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${handle} (last status: ${status.status})`);
+    }
+  }
+}

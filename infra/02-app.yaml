@@ -1,0 +1,420 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GitHub Wrapped - application tier. Six Lambdas (3 TypeScript API handlers,
+  3 Python pipeline steps) behind an HTTP API.
+
+  This is the template that gets redeployed most. Day to day, though,
+  collaborators should use `python scripts/push-fn.py <name>` instead -- that
+  updates one function's code in ~10s without touching CloudFormation.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-opus-5
+    Description: >
+      Model access must be enabled once, by hand, in the Bedrock console for
+      this region. Until then every generate-slides invocation fails with
+      AccessDeniedException.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+
+Resources:
+
+  # =========================================================================
+  # Shared IAM
+  # =========================================================================
+
+  # Every function reads the DB via the Data API. Kept as one managed policy so
+  # there is a single place to fix a missing permission, rather than six inline
+  # copies that drift apart.
+  DataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'gh-wrapped-${Stage}-data-access'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - rds-data:ExecuteStatement
+              - rds-data:BatchExecuteStatement
+              - rds-data:BeginTransaction
+              - rds-data:CommitTransaction
+              - rds-data:RollbackTransaction
+            Resource:
+              Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-cluster-arn'
+          # The Data API caller needs to read the secret too. Omitting this is
+          # the most common cause of a confusing AccessDeniedException that
+          # looks like an rds-data problem.
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-secret-arn'
+
+  # =========================================================================
+  # Roles - one per function, so a runaway function can't do a neighbour's job
+  # =========================================================================
+
+  StartIngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: &LambdaTrust
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref DataAccessPolicy
+      Policies:
+        - PolicyName: invoke-next
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:gh-wrapped-${Stage}-ingest-github'
+
+  ReadOnlyApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref DataAccessPolicy
+
+  IngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref DataAccessPolicy
+      Policies:
+        - PolicyName: github-and-next
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-github-pat-arn'
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:gh-wrapped-${Stage}-compute-stats'
+
+  ComputeStatsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref DataAccessPolicy
+      Policies:
+        - PolicyName: invoke-next
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:gh-wrapped-${Stage}-generate-slides'
+
+  GenerateSlidesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref DataAccessPolicy
+      Policies:
+        - PolicyName: bedrock
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                # Inference profiles and cross-region routing mean the ARN we
+                # actually hit isn't reliably predictable; scope by service.
+                Resource: '*'
+
+  # =========================================================================
+  # Functions
+  # =========================================================================
+
+  StartIngestFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'gh-wrapped-${Stage}-api-start-ingest'
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt StartIngestRole.Arn
+      Code: ../build/api-start-ingest
+      Timeout: 10
+      MemorySize: 512
+      Environment: &TsEnv
+        Variables:
+          STAGE: !Ref Stage
+          DB_CLUSTER_ARN:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-cluster-arn'
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-secret-arn'
+          DB_NAME:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-name'
+          NEXT_FN: !Sub 'gh-wrapped-${Stage}-ingest-github'
+
+  GetStatusFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'gh-wrapped-${Stage}-api-get-status'
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt ReadOnlyApiRole.Arn
+      Code: ../build/api-get-status
+      Timeout: 10
+      MemorySize: 512
+      Environment: *TsEnv
+
+  GetWrappedFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'gh-wrapped-${Stage}-api-get-wrapped'
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt ReadOnlyApiRole.Arn
+      Code: ../build/api-get-wrapped
+      Timeout: 10
+      MemorySize: 512
+      Environment: *TsEnv
+
+  IngestGithubFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'gh-wrapped-${Stage}-ingest-github'
+      Runtime: python3.12
+      Handler: handler.handler
+      Role: !GetAtt IngestRole.Arn
+      Code: ../build/ingest-github
+      # GitHub pagination over a prolific user's repos is genuinely slow.
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+          DB_CLUSTER_ARN:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-cluster-arn'
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-secret-arn'
+          DB_NAME:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-name'
+          GITHUB_PAT_SECRET_ARN:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-github-pat-arn'
+          NEXT_FN: !Sub 'gh-wrapped-${Stage}-compute-stats'
+
+  ComputeStatsFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'gh-wrapped-${Stage}-compute-stats'
+      Runtime: python3.12
+      Handler: handler.handler
+      Role: !GetAtt ComputeStatsRole.Arn
+      Code: ../build/compute-stats
+      Timeout: 120
+      MemorySize: 1024
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+          DB_CLUSTER_ARN:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-cluster-arn'
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-secret-arn'
+          DB_NAME:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-name'
+          NEXT_FN: !Sub 'gh-wrapped-${Stage}-generate-slides'
+
+  GenerateSlidesFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'gh-wrapped-${Stage}-generate-slides'
+      Runtime: python3.12
+      Handler: handler.handler
+      Role: !GetAtt GenerateSlidesRole.Arn
+      Code: ../build/generate-slides
+      # Five sequential Bedrock calls with thinking on. Do not trim this.
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+          DB_CLUSTER_ARN:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-cluster-arn'
+          DB_SECRET_ARN:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-secret-arn'
+          DB_NAME:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-name'
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          NEXT_FN: ''
+
+  # =========================================================================
+  # Log groups - declared explicitly so retention is bounded. Left to itself,
+  # Lambda creates them with "never expire".
+  # =========================================================================
+
+  StartIngestLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/gh-wrapped-${Stage}-api-start-ingest'
+      RetentionInDays: !Ref LogRetentionDays
+
+  GetStatusLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/gh-wrapped-${Stage}-api-get-status'
+      RetentionInDays: !Ref LogRetentionDays
+
+  GetWrappedLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/gh-wrapped-${Stage}-api-get-wrapped'
+      RetentionInDays: !Ref LogRetentionDays
+
+  IngestGithubLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/gh-wrapped-${Stage}-ingest-github'
+      RetentionInDays: !Ref LogRetentionDays
+
+  ComputeStatsLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/gh-wrapped-${Stage}-compute-stats'
+      RetentionInDays: !Ref LogRetentionDays
+
+  GenerateSlidesLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/gh-wrapped-${Stage}-generate-slides'
+      RetentionInDays: !Ref LogRetentionDays
+
+  # =========================================================================
+  # HTTP API
+  # =========================================================================
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'gh-wrapped-${Stage}'
+      ProtocolType: HTTP
+      CorsConfiguration:
+        # Wide open on purpose: this is a demo and the front end moves between
+        # localhost and Amplify constantly. Lock down before anything real.
+        AllowOrigins: ['*']
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: [content-type]
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+
+  StartIngestIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt StartIngestFn.Arn
+      PayloadFormatVersion: '2.0'
+
+  GetStatusIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt GetStatusFn.Arn
+      PayloadFormatVersion: '2.0'
+
+  GetWrappedIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt GetWrappedFn.Arn
+      PayloadFormatVersion: '2.0'
+
+  StartIngestRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /wrapped/{handle}'
+      Target: !Sub 'integrations/${StartIngestIntegration}'
+
+  GetStatusRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /wrapped/{handle}/status'
+      Target: !Sub 'integrations/${GetStatusIntegration}'
+
+  GetWrappedRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /wrapped/{handle}'
+      Target: !Sub 'integrations/${GetWrappedIntegration}'
+
+  StartIngestPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartIngestFn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/wrapped/*'
+
+  GetStatusPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GetStatusFn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/wrapped/*'
+
+  GetWrappedPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GetWrappedFn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/wrapped/*'
+
+Outputs:
+  ApiEndpoint:
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}'
+    Export:
+      Name: !Sub 'gh-wrapped-${Stage}-api-endpoint'
+
+  FunctionNames:
+    Description: Names that push-fn.py can target.
+    Value: !Join
+      - ','
+      - - !Ref StartIngestFn
+        - !Ref GetStatusFn
+        - !Ref GetWrappedFn
+        - !Ref IngestGithubFn
+        - !Ref ComputeStatsFn
+        - !Ref GenerateSlidesFn

@@ -1,0 +1,287 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GitHub Wrapped - access. Defines the permission boundary for collaborators
+  (scoped to the iterate-on-Lambdas loop, explicitly denied anything
+  destructive) and an OIDC role that GitHub Actions assumes to deploy on push.
+
+  Deploy with --capabilities CAPABILITY_NAMED_IAM.
+
+  Two deliberate omissions:
+   * No IAM users. CloudFormation cannot loop, and the alternative (N numbered
+     user slots guarded by conditions) breaks the moment the name list is
+     shorter than N. scripts/new-dev-creds.py creates the user and adds it to
+     the group defined here.
+   * No access keys. AWS::IAM::AccessKey puts the secret key in stack outputs,
+     readable by anyone with console access and retained in CloudFormation
+     state forever.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+
+  GithubOrgRepo:
+    Type: String
+    Default: mosspaul/github_wrapped
+    Description: owner/repo permitted to assume the deploy role.
+
+  DeployBranch:
+    Type: String
+    Default: main
+
+  CreateOidcProvider:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: >
+      The GitHub OIDC provider is account-global. If one already exists (from
+      another project), set this to false or the stack fails with
+      EntityAlreadyExists.
+
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ''
+    Description: Required only when CreateOidcProvider is false.
+
+Conditions:
+  MakeOidcProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+
+  # =========================================================================
+  # Collaborators
+  # =========================================================================
+
+  DeveloperPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'GhWrapped${Stage}Developer'
+      Description: Enough to iterate on gh-wrapped Lambdas; not enough to break the stack.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+
+          # --- the push-fn.py loop ---
+          - Sid: LambdaIterate
+            Effect: Allow
+            Action:
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:GetFunction
+              - lambda:GetFunctionConfiguration
+              - lambda:InvokeFunction
+              - lambda:ListVersionsByFunction
+            Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:gh-wrapped-*'
+
+          - Sid: LambdaList
+            Effect: Allow
+            Action: lambda:ListFunctions
+            Resource: '*'
+
+          # --- debugging ---
+          - Sid: ReadLogs
+            Effect: Allow
+            Action:
+              - logs:FilterLogEvents
+              - logs:GetLogEvents
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - logs:StartLiveTail
+              - logs:StopLiveTail
+            Resource: '*'
+
+          # --- db/migrate.py and the console Query Editor ---
+          - Sid: DataApi
+            Effect: Allow
+            Action: rds-data:*
+            Resource:
+              Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-cluster-arn'
+
+          # The Data API needs the secret as well as rds-data. Without this,
+          # every query fails with AccessDeniedException and no useful hint.
+          - Sid: ReadDbSecret
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+            Resource:
+              Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-secret-arn'
+
+          # The console Query Editor lists secrets to populate its dropdown.
+          - Sid: ListSecretsForQueryEditor
+            Effect: Allow
+            Action: secretsmanager:ListSecrets
+            Resource: '*'
+
+          # --- so scripts can resolve names and endpoints from stack outputs ---
+          - Sid: ReadStacks
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeStacks
+              - cloudformation:ListStacks
+              - cloudformation:DescribeStackEvents
+            Resource: '*'
+
+          - Sid: ArtifactBucket
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::gh-wrapped-${Stage}-artifacts-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::gh-wrapped-${Stage}-artifacts-${AWS::AccountId}/*'
+
+          - Sid: RdsDescribeForConsole
+            Effect: Allow
+            Action:
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+            Resource: '*'
+
+          # Lets people rotate their own password / MFA without admin help.
+          - Sid: ManageOwnCredentials
+            Effect: Allow
+            Action:
+              - iam:ChangePassword
+              - iam:GetUser
+              - iam:CreateVirtualMFADevice
+              - iam:EnableMFADevice
+              - iam:ListMFADevices
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:user/${!aws:username}'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:mfa/${!aws:username}'
+
+          # --- guardrails ---
+          # An explicit Deny beats every Allow, including one someone adds by
+          # mistake later. This is what makes handing out long-lived access
+          # keys tolerable: a leaked key still cannot drop the cluster.
+          - Sid: NeverDestroy
+            Effect: Deny
+            Action:
+              - cloudformation:DeleteStack
+              - cloudformation:UpdateStack
+              - cloudformation:CreateStack
+              - rds:Delete*
+              - rds:Modify*
+              - rds:Reboot*
+              - rds:Stop*
+              - lambda:DeleteFunction
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - s3:DeleteBucket
+              - secretsmanager:PutSecretValue
+              - secretsmanager:UpdateSecret
+              - secretsmanager:DeleteSecret
+              - amplify:Delete*
+            Resource: '*'
+
+          # iam:* is denied separately so the ManageOwnCredentials allow above
+          # survives -- a blanket Deny on iam:* would kill it.
+          - Sid: NoIamAdmin
+            Effect: Deny
+            Action:
+              - iam:CreateUser
+              - iam:DeleteUser
+              - iam:CreateAccessKey
+              - iam:DeleteAccessKey
+              - iam:AttachUserPolicy
+              - iam:PutUserPolicy
+              - iam:CreateRole
+              - iam:AttachRolePolicy
+              - iam:PutRolePolicy
+              - iam:CreatePolicy
+              - iam:CreatePolicyVersion
+            Resource: '*'
+
+  DeveloperGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub 'gh-wrapped-${Stage}-developers'
+      ManagedPolicyArns:
+        - !Ref DeveloperPolicy
+
+  # =========================================================================
+  # GitHub Actions OIDC
+  # =========================================================================
+
+  OidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # IAM stopped requiring a thumbprint for this provider in 2023 and now
+      # validates GitHub's cert chain itself, but the field is still mandatory.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'gh-wrapped-${Stage}-deploy'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - MakeOidcProvider
+                - !Ref OidcProvider
+                - !Ref ExistingOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # Pinned to this repo AND this branch. A wildcard here would let
+                # any repository on GitHub assume the role -- this condition is
+                # the entire security boundary of the OIDC setup.
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GithubOrgRepo}:ref:refs/heads/${DeployBranch}'
+      ManagedPolicyArns:
+        # Broad on purpose: this role runs `cloudformation deploy` across every
+        # template, which means it creates IAM roles for the Lambdas. Scoping it
+        # tightly is a day-2 task; it is reachable only from one branch of one
+        # repo, and no human holds credentials for it.
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      Policies:
+        - PolicyName: iam-for-cfn
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:TagRole
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/gh-wrapped-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/gh-wrapped-*'
+
+Outputs:
+  DeveloperGroupName:
+    Description: scripts/new-dev-creds.py adds new users to this group.
+    Value: !Ref DeveloperGroup
+
+  DeployRoleArn:
+    Description: Set as the AWS_DEPLOY_ROLE_ARN repository variable in GitHub.
+    Value: !GetAtt DeployRole.Arn
+
+  ConsoleSignInUrl:
+    Description: Where collaborators sign in for the RDS Query Editor.
+    Value: !Sub 'https://${AWS::AccountId}.signin.aws.amazon.com/console'

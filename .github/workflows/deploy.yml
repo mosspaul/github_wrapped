@@ -1,0 +1,49 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - 'lambdas/**'
+      - 'db/**'
+      - 'scripts/**'
+      - 'shared/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+# Never run two deploys against the same stack at once -- CloudFormation
+# rejects the second one and the run fails confusingly.
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # required to request the OIDC token
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Assume deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-1' }}
+
+      # Same script humans run locally, so CI and local cannot drift.
+      # The web stack is excluded: Amplify already redeploys itself on push,
+      # and it is the only stack needing a GitHub token we would have to store.
+      - name: Deploy
+        run: python scripts/deploy.py --stage dev --only bootstrap --only data --only app

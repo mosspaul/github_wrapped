@@ -1,0 +1,29 @@
+{
+  "slideTypes": [
+    {
+      "id": "commit_activity",
+      "title": "Commit Activity",
+      "blurb": "When and how much they commit across the year."
+    },
+    {
+      "id": "languages",
+      "title": "Languages",
+      "blurb": "Language breakdown by bytes written across all repos."
+    },
+    {
+      "id": "coding_personality",
+      "title": "Coding Personality",
+      "blurb": "A playful archetype derived from commit timing and repo habits."
+    },
+    {
+      "id": "year_in_code",
+      "title": "Year in Code",
+      "blurb": "Headline totals for the year: commits, repos, streaks."
+    },
+    {
+      "id": "standout_projects",
+      "title": "Standout Projects",
+      "blurb": "The repos that got the most traction."
+    }
+  ]
+}

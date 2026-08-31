@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GitHub Wrapped - web tier. Amplify Hosting connected to the GitHub repo,
+  auto-building the Vite front end on every push to main.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+
+  RepositoryUrl:
+    Type: String
+    Default: https://github.com/mosspaul/github_wrapped
+    Description: HTTPS repo URL (not the git@ SSH form - Amplify rejects that).
+
+  BranchName:
+    Type: String
+    Default: main
+
+  GithubAccessToken:
+    Type: String
+    NoEcho: true
+    Description: >
+      A GitHub PAT with `repo` and `admin:repo_hook` scope. This is NOT the same
+      token as the one in gh-wrapped/<stage>/github-pat -- that one is read-only
+      public data for the app; this one lets Amplify clone the repo and install
+      a webhook. Passed at deploy time, never committed.
+
+Resources:
+
+  AmplifyServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: amplify.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: amplify-logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/amplify/*'
+
+  AmplifyApp:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: !Sub 'gh-wrapped-${Stage}'
+      Repository: !Ref RepositoryUrl
+      AccessToken: !Ref GithubAccessToken
+      Platform: WEB
+      IAMServiceRoleArn: !GetAtt AmplifyServiceRole.Arn
+      EnvironmentVariables:
+        - Name: VITE_API_BASE
+          Value:
+            Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-api-endpoint'
+      CustomRules:
+        # Single-page app: every unmatched path serves index.html rather than
+        # Amplify's 404. Without this a refresh on any route 404s.
+        - Source: '</^[^.]+$|\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff2?|ttf|map|json)$)([^.]+$)/>'
+          Target: /index.html
+          Status: '200'
+      BuildSpec: |
+        version: 1
+        frontend:
+          phases:
+            preBuild:
+              commands:
+                - cd web
+                - npm ci
+            build:
+              commands:
+                - npm run build
+          artifacts:
+            baseDirectory: web/dist
+            files:
+              - '**/*'
+          cache:
+            paths:
+              - web/node_modules/**/*
+
+  AmplifyBranch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      AppId: !GetAtt AmplifyApp.AppId
+      BranchName: !Ref BranchName
+      EnableAutoBuild: true
+      Stage: DEVELOPMENT
+
+Outputs:
+  AmplifyAppId:
+    Value: !GetAtt AmplifyApp.AppId
+
+  AmplifyUrl:
+    Value: !Sub 'https://${BranchName}.${AmplifyApp.DefaultDomain}'
+    Export:
+      Name: !Sub 'gh-wrapped-${Stage}-web-url'

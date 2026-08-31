@@ -1,0 +1,5 @@
+-r ../requirements-base.txt
+# Pulls in boto3 as a transitive dep (Bedrock request signing), which is why
+# this bundle is ~45MB while the others are tiny. Under the 250MB unzipped
+# limit, so not worth fighting.
+anthropic[bedrock]==1.2.0

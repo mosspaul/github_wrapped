@@ -1,0 +1,42 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GitHub Wrapped - bootstrap. S3 bucket that holds packaged Lambda artifacts.
+  Deploy this once; it should essentially never change.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+
+Resources:
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    # Retain so a `delete-stack` during teardown doesn't fail on a non-empty
+    # bucket and leave the whole stack wedged.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'gh-wrapped-${Stage}-artifacts-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          # Lambda bundles pile up fast when six people are pushing all weekend.
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 7
+
+Outputs:
+  ArtifactsBucketName:
+    Value: !Ref ArtifactsBucket
+    Export:
+      Name: !Sub 'gh-wrapped-${Stage}-artifacts-bucket'
