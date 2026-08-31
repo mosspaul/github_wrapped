@@ -91,7 +91,17 @@ def main() -> None:
     p.add_argument(
         "--github-token",
         default=None,
-        help="PAT with repo scope, required the first time the web stack deploys",
+        help=(
+            "Optional. Only for connecting the repo to Amplify through "
+            "CloudFormation instead of the console. Must be a CLASSIC GitHub "
+            "token (ghp_...) with repo + admin:repo_hook -- fine-grained "
+            "tokens do not work with Amplify."
+        ),
+    )
+    p.add_argument(
+        "--repository-url",
+        default="https://github.com/mosspaul/github_wrapped",
+        help="HTTPS repo URL, used only alongside --github-token",
     )
     p.add_argument(
         "--bedrock-model",
@@ -121,19 +131,15 @@ def main() -> None:
         params: list[str] = []
         if key == "app" and args.bedrock_model:
             params.append(f"BedrockModelId={args.bedrock_model}")
-        if key == "web":
-            if args.github_token:
-                params.append(f"GithubAccessToken={args.github_token}")
-            else:
-                # Deliberately pass nothing rather than an empty string:
-                # `cloudformation deploy` keeps the stored value for any
-                # parameter it is not given, whereas GithubAccessToken= would
-                # overwrite the real token with an empty one and break Amplify's
-                # repo access. Only a first-ever web deploy needs the flag.
-                print(
-                    "note: no --github-token given; keeping the token already "
-                    "stored in the stack (a first-time web deploy needs --github-token)"
-                )
+        if key == "web" and args.github_token:
+            # Optional. The default path connects the repository in the Amplify
+            # console instead, which needs no token at all -- see 03-web.yaml.
+            # Passing nothing (rather than an empty string) matters on the token
+            # path: `cloudformation deploy` keeps the stored value for any
+            # parameter it is not given, so an empty string would wipe a real
+            # token and break Amplify's repo access.
+            params.append(f"GithubAccessToken={args.github_token}")
+            params.append(f"RepositoryUrl={args.repository_url}")
 
         deploy_stack(key, args.stage, args.profile, args.region, params)
 

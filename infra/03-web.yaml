@@ -1,7 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  GitHub Wrapped - web tier. Amplify Hosting connected to the GitHub repo,
-  auto-building the Vite front end on every push to main.
+  GitHub Wrapped - web tier. Amplify Hosting for the Vite front end.
+
+  By default this creates the app WITHOUT a repository connection, and you
+  connect the repo once in the Amplify console. That console flow installs the
+  Amplify GitHub App scoped to just this repository, so no GitHub token is
+  created, passed through CloudFormation, or held by AWS. Auto-deploy on push
+  still works exactly the same.
+
+  The token path is still supported -- supply RepositoryUrl and
+  GithubAccessToken and this template will wire the connection itself. See the
+  parameter descriptions for the caveats before choosing it.
 
 Parameters:
   Stage:
@@ -10,64 +19,72 @@ Parameters:
 
   RepositoryUrl:
     Type: String
-    Default: https://github.com/mosspaul/github_wrapped
-    Description: HTTPS repo URL (not the git@ SSH form - Amplify rejects that).
+    Default: ''
+    Description: >
+      Leave EMPTY to connect the repository in the Amplify console (the
+      recommended path). Only set this if you are also supplying
+      GithubAccessToken. Must be the HTTPS URL, e.g.
+      https://github.com/mosspaul/github_wrapped -- the git@ SSH form is
+      rejected.
+
+  GithubAccessToken:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: >
+      Only needed if you are connecting the repo through CloudFormation rather
+      than the console. Must be a CLASSIC GitHub token (ghp_...) with `repo`
+      and `admin:repo_hook`; fine-grained tokens are silently rejected by
+      Amplify. Note `repo` grants read AND write to every repository you own,
+      which is why the console flow is preferred. Amplify does not store the
+      token -- it is used once to establish the connection and webhook.
 
   BranchName:
     Type: String
     Default: main
 
-  GithubAccessToken:
-    Type: String
-    NoEcho: true
-    Description: >
-      A GitHub PAT with `repo` and `admin:repo_hook` scope. This is NOT the same
-      token as the one in gh-wrapped/<stage>/github-pat -- that one is read-only
-      public data for the app; this one lets Amplify clone the repo and install
-      a webhook. Passed at deploy time, never committed.
+Conditions:
+  # Only wire the repository from CloudFormation when BOTH halves are present.
+  # Amplify rejects a Repository without a token, so a half-filled config would
+  # fail the stack rather than quietly doing the right thing.
+  ConnectRepoFromCfn: !And
+    - !Not [!Equals [!Ref RepositoryUrl, '']]
+    - !Not [!Equals [!Ref GithubAccessToken, '']]
 
 Resources:
-
-  AmplifyServiceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: amplify.amazonaws.com }
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: amplify-logs
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                  - logs:DescribeLogGroups
-                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/amplify/*'
 
   AmplifyApp:
     Type: AWS::Amplify::App
     Properties:
       Name: !Sub 'gh-wrapped-${Stage}'
-      Repository: !Ref RepositoryUrl
-      AccessToken: !Ref GithubAccessToken
       Platform: WEB
-      IAMServiceRoleArn: !GetAtt AmplifyServiceRole.Arn
+      # No IAMServiceRoleArn on purpose. Amplify's Early Validation hook checks
+      # that the role exists and is assumable *before* CloudFormation creates
+      # it, so a role declared in this same stack always fails the changeset
+      # with an unhelpful AWS::EarlyValidation::PropertyValidation error.
+      # A static SPA does not need one; Amplify provisions a service role
+      # itself if you later enable a feature that requires it.
+
+      # Both omitted entirely in the console-connection path. AWS::NoValue is
+      # what makes that possible -- an empty string would be treated as a real
+      # (invalid) value.
+      Repository: !If [ConnectRepoFromCfn, !Ref RepositoryUrl, !Ref 'AWS::NoValue']
+      AccessToken: !If [ConnectRepoFromCfn, !Ref GithubAccessToken, !Ref 'AWS::NoValue']
+
       EnvironmentVariables:
         - Name: VITE_API_BASE
           Value:
             Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-api-endpoint'
+
       CustomRules:
-        # Single-page app: every unmatched path serves index.html rather than
-        # Amplify's 404. Without this a refresh on any route 404s.
+        # Single-page app: serve index.html for any path that is not a real
+        # file, otherwise refreshing on a route 404s.
         - Source: '</^[^.]+$|\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff2?|ttf|map|json)$)([^.]+$)/>'
           Target: /index.html
           Status: '200'
+
+      # The console connection flow will pick this up; it does not need to be
+      # re-entered there.
       BuildSpec: |
         version: 1
         frontend:
@@ -87,8 +104,12 @@ Resources:
             paths:
               - web/node_modules/**/*
 
+  # Only created on the token path. On the console path, Amplify creates the
+  # branch itself when you connect the repository -- declaring it here first
+  # would fail, because a branch cannot exist without a repository behind it.
   AmplifyBranch:
     Type: AWS::Amplify::Branch
+    Condition: ConnectRepoFromCfn
     Properties:
       AppId: !GetAtt AmplifyApp.AppId
       BranchName: !Ref BranchName
@@ -97,9 +118,17 @@ Resources:
 
 Outputs:
   AmplifyAppId:
+    Description: Use this to find the app in the console.
     Value: !GetAtt AmplifyApp.AppId
 
+  AmplifyConsoleUrl:
+    Description: Open this to connect the repository (console path).
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/amplify/apps/${AmplifyApp.AppId}'
+
   AmplifyUrl:
+    Description: >
+      The site URL. On the console path this only resolves once you have
+      connected the repository and the first build has finished.
     Value: !Sub 'https://${BranchName}.${AmplifyApp.DefaultDomain}'
     Export:
       Name: !Sub 'gh-wrapped-${Stage}-web-url'

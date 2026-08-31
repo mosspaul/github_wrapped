@@ -116,6 +116,20 @@ Pass it explicitly (`deploy.py --bedrock-model ...`). This is also why
 in security group descriptions; this killed the first data-stack deploy. Use a
 plain single-line string for anything with a restricted charset.
 
+**`AWS::Amplify::App` cannot take an `IAMServiceRoleArn` pointing at a role in
+the same stack.** Amplify's Early Validation hook checks the role exists and is
+assumable *before* CloudFormation creates it, so the changeset fails with a
+bare `AWS::EarlyValidation::PropertyValidation` and no detail in stack events.
+A static SPA does not need the role; it is omitted. Diagnosed by bisecting a
+minimal template property by property, which is the only practical way to find
+an early-validation failure.
+
+**Amplify needs no GitHub token.** The repo is connected once in the console,
+which installs the Amplify GitHub App scoped to this repo alone. `03-web.yaml`
+still supports the token path behind a condition, but it requires a *classic*
+`ghp_` token with `repo` scope -- fine-grained tokens are silently rejected by
+Amplify, and `repo` grants read/write to every repo the owner has.
+
 **Aurora engine versions differ by region.** The Data API needs 3.07+, but
 us-west-1 offers 3.08.0–3.13.0 and *no* 3.07.x. Pinned to the regional default
 `8.0.mysql_aurora.3.10.3`. Check with `aws rds describe-db-engine-versions
@@ -162,8 +176,10 @@ HTTP API at `https://ap4n9q6iei.execute-api.us-west-1.amazonaws.com`).
 Five of six functions verified against real data. `generate-slides` is blocked
 only on the Bedrock use-case form.
 
-Not yet deployed: `03-web` (needs an Amplify PAT), `04-access` (collaborator
-IAM + GitHub OIDC).
+`03-web` is deployed: Amplify app `d2uskcsztnslls`, build spec / SPA rewrite /
+`VITE_API_BASE` all set, awaiting a one-time console repo connection.
+
+Not yet deployed: `04-access` (collaborator IAM + GitHub OIDC).
 
 Deliberately not built: end-user auth, rate limiting, caching/TTL on GitHub
 data, Step Functions, prod stage, alarms, cost budgets. CORS is `*`.

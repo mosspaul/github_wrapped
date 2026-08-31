@@ -88,9 +88,9 @@ aws sts get-caller-identity       # confirm you're in the right account
    Editing the `Default:` in `02-app.yaml` is **not** enough — CloudFormation
    reuses the value a parameter was last deployed with.
 
-2. **Create two GitHub PATs** (they are genuinely different tokens):
-   - `public_repo` — the app reads public GitHub data with this
-   - `repo` + `admin:repo_hook` — Amplify clones the repo and installs a webhook
+2. **Create one GitHub PAT** — classic, `public_repo` scope. This is what
+   `ingest-github` uses to read public GitHub data at 5000 req/hr instead of 60.
+   Amplify does **not** need a token; see step 6.
 
 3. **Deploy:**
    ```bash
@@ -107,6 +107,15 @@ aws sts get-caller-identity       # confirm you're in the right account
    ```
 
 5. **Set up collaborator access** (see [Collaborators](#collaborators) below).
+
+6. **Connect the repo to Amplify** — once, in the console. Open the
+   `AmplifyConsoleUrl` from the web stack outputs, choose **Connect branch** →
+   GitHub, authorize, and pick `mosspaul/github_wrapped` / `main`.
+
+   This installs the Amplify GitHub App scoped to just this repo, so no token
+   is created or stored anywhere. The build spec, SPA rewrite rule, and
+   `VITE_API_BASE` are already set by CloudFormation — don't re-enter them.
+   After this, every push to `main` rebuilds the front end automatically.
 
 ---
 
