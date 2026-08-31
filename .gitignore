@@ -22,3 +22,6 @@ venv/
 # never commit credentials
 *.pem
 credentials.json
+
+# typescript incremental build cache
+*.tsbuildinfo
