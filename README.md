@@ -8,6 +8,11 @@ This repo currently contains **the scaffolding**: infrastructure, deployment
 scripts, and a working stub for every Lambda. The pipeline runs end to end
 today; most of the actual logic is still to be written, and the stubs mark where.
 
+> **New here? Read [ONBOARDING.md](ONBOARDING.md)** — what to run and where your
+> code goes, in about 10 minutes. This README is the reference for whoever owns
+> the infrastructure. [CLAUDE.md](CLAUDE.md) carries the architectural decisions
+> and the gotchas that have already cost someone an afternoon.
+
 ---
 
 ## Architecture
