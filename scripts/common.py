@@ -1,6 +1,7 @@
 """Shared helpers for the build/deploy scripts."""
 
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -21,14 +22,26 @@ PIP_PLATFORM = ["--platform", "manylinux2014_x86_64", "--only-binary=:all:"]
 PY_VERSION = "3.12"
 
 
-def run(cmd: list[str], cwd: pathlib.Path | None = None, capture: bool = False) -> str:
-    """Run a command, echoing it first. Exits the script on failure."""
+def run(
+    cmd: list[str],
+    cwd: pathlib.Path | None = None,
+    capture: bool = False,
+    env: dict[str, str] | None = None,
+) -> str:
+    """
+    Run a command, echoing it first. Exits the script on failure.
+
+    `env` is merged over the current environment rather than replacing it --
+    a bare env would strip PATH and break npm/aws entirely.
+    """
     printable = " ".join(cmd)
     print(f"  $ {printable}")
+    merged = {**os.environ, **env} if env else None
     try:
         res = subprocess.run(
             cmd,
             cwd=cwd or ROOT,
+            env=merged,
             check=True,
             text=True,
             capture_output=capture,

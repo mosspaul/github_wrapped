@@ -77,12 +77,20 @@ Status goes `pending → ingesting → computing → generating → ready`.
 If it stops somewhere, **that status names the Lambda to go read logs for**.
 `error` is terminal and carries the message.
 
-Front end against the real API:
+The deployed site: **https://main.d2uskcsztnslls.amplifyapp.com**
+
+Front end locally, against the real API:
 
 ```bash
 cd web
 cp .env.example .env.local    # paste the API URL above into it
 npm install && npm run dev
+```
+
+Pushing the front end live (also happens automatically on push to `main`):
+
+```bash
+python scripts/deploy-web.py
 ```
 
 ## 5. Look at the database

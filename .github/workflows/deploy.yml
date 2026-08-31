@@ -9,11 +9,12 @@ on:
       - 'db/**'
       - 'scripts/**'
       - 'shared/**'
+      - 'web/**'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
 
 # Never run two deploys against the same stack at once -- CloudFormation
-# rejects the second one and the run fails confusingly.
+# rejects the second and the run fails confusingly.
 concurrency:
   group: deploy-dev
   cancel-in-progress: false
@@ -22,28 +23,80 @@ permissions:
   id-token: write   # required to request the OIDC token
   contents: read
 
+env:
+  AWS_REGION: us-west-1
+  # Hardcoded rather than a repository variable on purpose. Managing Actions
+  # variables needs repository admin, and this repo belongs to another personal
+  # account where collaborators only get write access. A role ARN is not a
+  # secret -- the security boundary is the role's trust policy, which only
+  # accepts tokens whose `sub` is exactly
+  # repo:mosspaul/github_wrapped:ref:refs/heads/main.
+  AWS_DEPLOY_ROLE_ARN: arn:aws:iam::802133075723:role/gh-wrapped-dev-deploy
+
 jobs:
-  deploy:
+  backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
 
       - name: Assume deploy role
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-west-1' }}
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      # Same script humans run locally, so CI and local cannot drift.
-      # The web stack is excluded: Amplify already redeploys itself on push,
-      # and it is the only stack needing a GitHub token we would have to store.
-      - name: Deploy
-        run: python scripts/deploy.py --stage dev --only bootstrap --only data --only app
+      - name: Install tooling
+        run: python -m pip install -r requirements-dev.txt
+
+      # The same script humans run locally, so CI and local cannot drift.
+      # `web` and `access` are excluded: the site is published by the job below,
+      # and `access` manages account-wide IAM that should only change when the
+      # account owner runs it deliberately.
+      - name: Deploy backend stacks
+        run: |
+          python scripts/deploy.py \
+            --stage dev \
+            --region "$AWS_REGION" \
+            --only bootstrap --only data --only app
+
+  frontend:
+    runs-on: ubuntu-latest
+    # The front end reads VITE_API_BASE from the app stack's output, so the
+    # backend has to be settled before the site is built against it.
+    needs: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Assume deploy role
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install tooling
+        run: python -m pip install -r requirements-dev.txt
+
+      # Amplify's own git integration is not used -- connecting a repository
+      # requires repo admin, which we do not have here. deploy-web.py pushes a
+      # build artifact to Amplify's manual deployment API instead, which needs
+      # no GitHub access at all.
+      - name: Build and publish the site
+        run: python scripts/deploy-web.py --stage dev --region "$AWS_REGION"

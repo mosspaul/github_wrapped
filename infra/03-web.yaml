@@ -2,15 +2,20 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   GitHub Wrapped - web tier. Amplify Hosting for the Vite front end.
 
-  By default this creates the app WITHOUT a repository connection, and you
-  connect the repo once in the Amplify console. That console flow installs the
-  Amplify GitHub App scoped to just this repository, so no GitHub token is
-  created, passed through CloudFormation, or held by AWS. Auto-deploy on push
-  still works exactly the same.
+  The app is created WITHOUT a repository connection, and the site is published
+  by pushing a build artifact to Amplify's manual deployment API -- see
+  scripts/deploy-web.py, which CI also calls.
 
-  The token path is still supported -- supply RepositoryUrl and
-  GithubAccessToken and this template will wire the connection itself. See the
-  parameter descriptions for the caveats before choosing it.
+  This is not the usual Amplify setup, and the reason is specific: the repo is
+  owned by another personal GitHub account. Connecting Amplify to a repository
+  (via the GitHub App or a token with admin:repo_hook) requires repository
+  admin, and personal-account repos grant collaborators write access only --
+  there is no admin role to hand out. Manual deployment needs no GitHub access
+  whatsoever.
+
+  If the repo ever moves to an org, or to an account that can install the
+  Amplify GitHub App, supply RepositoryUrl and GithubAccessToken and this
+  template will wire up the native git integration instead.
 
 Parameters:
   Stage:
@@ -104,16 +109,17 @@ Resources:
             paths:
               - web/node_modules/**/*
 
-  # Only created on the token path. On the console path, Amplify creates the
-  # branch itself when you connect the repository -- declaring it here first
-  # would fail, because a branch cannot exist without a repository behind it.
+  # Always created. A branch does NOT require a repository behind it -- an
+  # unconnected branch is exactly what Amplify's manual deployment API targets,
+  # which is how scripts/deploy-web.py and CI publish the site.
   AmplifyBranch:
     Type: AWS::Amplify::Branch
-    Condition: ConnectRepoFromCfn
     Properties:
       AppId: !GetAtt AmplifyApp.AppId
       BranchName: !Ref BranchName
-      EnableAutoBuild: true
+      # Only meaningful on the token path; a repo-less branch has nothing to
+      # auto-build from and ignores this.
+      EnableAutoBuild: !If [ConnectRepoFromCfn, true, false]
       Stage: DEVELOPMENT
 
 Outputs:

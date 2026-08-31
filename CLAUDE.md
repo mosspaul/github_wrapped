@@ -124,11 +124,31 @@ A static SPA does not need the role; it is omitted. Diagnosed by bisecting a
 minimal template property by property, which is the only practical way to find
 an early-validation failure.
 
-**Amplify needs no GitHub token.** The repo is connected once in the console,
-which installs the Amplify GitHub App scoped to this repo alone. `03-web.yaml`
-still supports the token path behind a condition, but it requires a *classic*
-`ghp_` token with `repo` scope -- fine-grained tokens are silently rejected by
-Amplify, and `repo` grants read/write to every repo the owner has.
+**Amplify's git integration is deliberately NOT used.** The repo is owned by
+another personal account (`mosspaul`), and connecting a repository -- via the
+GitHub App or a token with `admin:repo_hook` -- requires repository admin.
+Personal-account repos have only two levels, owner and write-collaborator, so
+there is no admin to grant. The site is published by pushing a build artifact
+to Amplify's manual deployment API (`scripts/deploy-web.py`), which needs no
+GitHub access at all. An Amplify branch does not require a repository behind
+it. `03-web.yaml` keeps the token path behind a condition for if the repo ever
+moves to an org.
+
+**With manual deployment, Amplify's environment variables do nothing.** They
+only apply to builds Amplify runs from a connected repo. We build the bundle,
+and Vite inlines env vars at build time -- so `deploy-web.py` injects
+`VITE_API_BASE` from the app stack's output and then greps the built bundle to
+confirm it landed. Without that, the site deploys, loads fine, and sends every
+request to `undefined/wrapped/...`.
+
+**GitHub Actions variables/secrets also need repo admin**, so the OIDC role ARN
+is hardcoded in the workflow. That is safe: a role ARN is not a credential, and
+the trust policy only accepts a token whose `sub` is exactly
+`repo:mosspaul/github_wrapped:ref:refs/heads/main`.
+
+**The GitHub OIDC provider is account-global.** One already existed in this
+account, so `04-access` is deployed with `--oidc-provider-arn` to reuse it;
+creating a second fails with `AlreadyExists`.
 
 **Aurora engine versions differ by region.** The Data API needs 3.07+, but
 us-west-1 offers 3.08.0–3.13.0 and *no* 3.07.x. Pinned to the regional default
@@ -176,10 +196,13 @@ HTTP API at `https://ap4n9q6iei.execute-api.us-west-1.amazonaws.com`).
 Five of six functions verified against real data. `generate-slides` is blocked
 only on the Bedrock use-case form.
 
-`03-web` is deployed: Amplify app `d2uskcsztnslls`, build spec / SPA rewrite /
-`VITE_API_BASE` all set, awaiting a one-time console repo connection.
+All five stacks are deployed. The site is live at
+`https://main.d2uskcsztnslls.amplifyapp.com`, serving the real API URL and with
+the SPA rewrite working. `04-access` provides the developer group and the
+deploy role `arn:aws:iam::802133075723:role/gh-wrapped-dev-deploy`.
 
-Not yet deployed: `04-access` (collaborator IAM + GitHub OIDC).
+No collaborator IAM users exist yet -- create them with
+`scripts/new-dev-creds.py <name>`.
 
 Deliberately not built: end-user auth, rate limiting, caching/TTL on GitHub
 data, Step Functions, prod stage, alarms, cost budgets. CORS is `*`.

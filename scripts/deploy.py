@@ -99,6 +99,14 @@ def main() -> None:
         ),
     )
     p.add_argument(
+        "--oidc-provider-arn",
+        default=None,
+        help=(
+            "Reuse an existing GitHub OIDC provider instead of creating one. "
+            "Find it with: aws iam list-open-id-connect-providers"
+        ),
+    )
+    p.add_argument(
         "--repository-url",
         default="https://github.com/mosspaul/github_wrapped",
         help="HTTPS repo URL, used only alongside --github-token",
@@ -131,6 +139,12 @@ def main() -> None:
         params: list[str] = []
         if key == "app" and args.bedrock_model:
             params.append(f"BedrockModelId={args.bedrock_model}")
+        if key == "access" and args.oidc_provider_arn:
+            # The GitHub OIDC provider is account-global. If another project
+            # already created one, creating a second fails with AlreadyExists
+            # -- reuse it instead.
+            params.append("CreateOidcProvider=false")
+            params.append(f"ExistingOidcProviderArn={args.oidc_provider_arn}")
         if key == "web" and args.github_token:
             # Optional. The default path connects the repository in the Amplify
             # console instead, which needs no token at all -- see 03-web.yaml.
