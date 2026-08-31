@@ -70,6 +70,7 @@ def _coding_personality(handle: str) -> dict:
 
 
 def _year_in_code(handle: str) -> dict:
+    # Test ----
     # PLACEHOLDER -- headline totals for the year.
     rows = db.sql(
         """
