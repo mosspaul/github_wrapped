@@ -99,13 +99,37 @@ If you want the SDK back, first prove a plain httpx request works from inside a
 deployed Lambda.
 
 **Bedrock model ids must be inference profiles** (`us.anthropic.claude-...`),
-not bare foundation model ids. Two distinct failures, with different fixes:
+not bare foundation model ids, and the exact id matters -- a guessed one fails
+as `ValidationException`, which reads like a bad request body rather than a bad
+id. Get the real list, never guess:
+
+```bash
+aws bedrock list-inference-profiles --region us-west-1 \
+  --query 'inferenceProfileSummaries[?contains(inferenceProfileId,`anthropic`)].inferenceProfileId'
+```
+
+There are **three** independent gates, each with a different error and a
+different fix. Clearing one surfaces the next, so "the form went through" does
+not mean the model works:
 - `ResourceNotFoundException: Model use case details have not been submitted`
   → self-serve form in the Bedrock console, ~15 min to propagate.
+- `AccessDeniedException: ... not authorized to perform the required AWS
+  Marketplace actions (aws-marketplace:Subscribe)` → the model needs a
+  Marketplace subscription. **This is not an IAM problem** and adding
+  permissions will not fix it -- it happens as the account *root*, which cannot
+  be denied anything. Enable the model in the Bedrock console's Model access
+  page, which performs the subscription.
 - `AccessDeniedException: <model> is not available for this account`
-  → account tier limit; needs AWS Sales. This account currently gets this for
-  `opus-5` and `opus-4-8`, which is why the default is
-  `us.anthropic.claude-opus-4-6-v1`.
+  → account tier limit; needs AWS Sales.
+
+As of 2026-08-31 in this account: `sonnet-4-6`, `sonnet-4-5` and `haiku-4-5`
+work. `opus-4-6` is stuck on the Marketplace gate. `opus-5`, `opus-4-7` and
+`opus-4-8` are tier-limited. The default is therefore
+`us.anthropic.claude-sonnet-4-6`. To move once opus-4-6 clears:
+
+```bash
+python scripts/deploy.py --only app --bedrock-model us.anthropic.claude-opus-4-6-v1
+```
 
 **Changing a `Default:` in a template does not change a deployed stack.**
 `cloudformation deploy` reuses the value a parameter was last deployed with.
@@ -150,6 +174,32 @@ the trust policy only accepts a token whose `sub` is exactly
 account, so `04-access` is deployed with `--oidc-provider-arn` to reuse it;
 creating a second fails with `AlreadyExists`.
 
+**GitHub sends immutable OIDC subject claims.** The `sub` is not the documented
+`repo:owner/name:ref:refs/heads/main`. It carries numeric ids:
+
+    repo:mosspaul@97133779/github_wrapped@1352708903:ref:refs/heads/main
+
+The ids are the point -- a renamed or re-registered repo keeps its name but
+never its id, so trust cannot be inherited by a look-alike. A trust policy
+written the documented way fails `StringEquals` and every run dies with
+`Not authorized to perform sts:AssumeRoleWithWebIdentity`.
+
+That message covers *every* possible mismatch and STS will not say which one,
+because naming it would let a stranger enumerate your roles. **Do not reason
+forward from the template about what GitHub should be sending -- read what it
+actually sent.** Every rejected attempt is in CloudTrail Event history (90 days,
+no trail required) with the real claim in `userIdentity.userName`:
+
+```bash
+python scripts/diagnose-oidc.py     # does exactly this, and names the fix
+```
+
+`04-access.yaml` trusts **both** forms, as two exact strings -- never a
+wildcard, which would let any repo on GitHub assume the role. Both are pinned
+to this repo and branch; the second is a safety net in case GitHub rolls the
+change back. `GithubOwnerId`/`GithubRepoId` come from the GitHub API and must
+be updated if the repo ever moves.
+
 **Aurora engine versions differ by region.** The Data API needs 3.07+, but
 us-west-1 offers 3.08.0–3.13.0 and *no* 3.07.x. Pinned to the regional default
 `8.0.mysql_aurora.3.10.3`. Check with `aws rds describe-db-engine-versions
@@ -193,16 +243,23 @@ corrupted test results before. If AWS results look self-contradictory, re-run
 Deployed and working in us-west-1: bootstrap, data (6 tables), app (6 Lambdas +
 HTTP API at `https://ap4n9q6iei.execute-api.us-west-1.amazonaws.com`).
 
-Five of six functions verified against real data. `generate-slides` is blocked
-only on the Bedrock use-case form.
+**The full pipeline runs green.** All six functions verified against real data:
+`octocat` goes pending -> ingesting -> computing -> generating -> ready and
+returns five slides with model-authored HTML (5-9KB each, no `<script>`),
+ordered by `slide-types.json` rather than by what the database happened to
+return. Bedrock logs real token usage against `us.anthropic.claude-sonnet-4-6`.
 
 All five stacks are deployed. The site is live at
 `https://main.d2uskcsztnslls.amplifyapp.com`, serving the real API URL and with
 the SPA rewrite working. `04-access` provides the developer group and the
 deploy role `arn:aws:iam::802133075723:role/gh-wrapped-dev-deploy`.
 
-No collaborator IAM users exist yet -- create them with
+One collaborator exists (`derk5`) in `gh-wrapped-dev-developers`. Add more with
 `scripts/new-dev-creds.py <name>`.
+
+Still unproven: the GitHub Actions workflow. The OIDC trust policy has been
+fixed and verified against the claim GitHub actually sends, but no run has
+succeeded yet.
 
 Deliberately not built: end-user auth, rate limiting, caching/TTL on GitHub
 data, Step Functions, prod stage, alarms, cost budgets. CORS is `*`.

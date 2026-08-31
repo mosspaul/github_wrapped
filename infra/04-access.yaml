@@ -29,6 +29,26 @@ Parameters:
     Type: String
     Default: main
 
+  # GitHub now issues "immutable" subject claims: the OIDC sub carries the
+  # numeric owner and repo ids alongside the names, e.g.
+  #   repo:mosspaul@97133779/github_wrapped@1352708903:ref:refs/heads/main
+  # rather than the documented repo:owner/name:ref:... form. The ids are what
+  # make the claim immutable -- a renamed or re-registered repo keeps its name
+  # but never its id, so trust cannot be inherited by a look-alike.
+  #
+  # Read them from the GitHub API (no auth needed for a public repo):
+  #   curl -s https://api.github.com/repos/<owner>/<repo>
+  # then read .owner.id (GithubOwnerId) and .id (GithubRepoId).
+  GithubOwnerId:
+    Type: String
+    Default: '97133779'
+    Description: Numeric id of the repo owner (github api .owner.id).
+
+  GithubRepoId:
+    Type: String
+    Default: '1352708903'
+    Description: Numeric id of the repository (github api .id).
+
   CreateOidcProvider:
     Type: String
     AllowedValues: ['true', 'false']
@@ -237,7 +257,21 @@ Resources:
                 # Pinned to this repo AND this branch. A wildcard here would let
                 # any repository on GitHub assume the role -- this condition is
                 # the entire security boundary of the OIDC setup.
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${GithubOrgRepo}:ref:refs/heads/${DeployBranch}'
+                #
+                # BOTH forms are listed because GitHub is migrating the sub
+                # claim from names to name@id (see GithubOwnerId above). A
+                # StringEquals list matches if ANY entry matches, so this keeps
+                # working whichever form GitHub sends, and neither entry is a
+                # wildcard -- both are exact and pinned to this repo and branch.
+                # Listing only the id form would break CI silently if GitHub
+                # rolled the change back, and the resulting AccessDenied names
+                # no cause at all.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub
+                    - 'repo:${Owner}@${GithubOwnerId}/${Repo}@${GithubRepoId}:ref:refs/heads/${DeployBranch}'
+                    - Owner: !Select [0, !Split ['/', !Ref GithubOrgRepo]]
+                      Repo: !Select [1, !Split ['/', !Ref GithubOrgRepo]]
+                  - !Sub 'repo:${GithubOrgRepo}:ref:refs/heads/${DeployBranch}'
       ManagedPolicyArns:
         # Broad on purpose: this role runs `cloudformation deploy` across every
         # template, which means it creates IAM roles for the Lambdas. Scoping it

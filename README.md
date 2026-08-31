@@ -67,19 +67,31 @@ aws sso login                     # this repo's default profile is SSO
 aws sts get-caller-identity       # confirm you're in the right account
 ```
 
-1. **Bedrock model access** — one-time, manual, and there are *two separate
-   gates* with different error messages:
+1. **Bedrock model access** — one-time, manual, and there are *three separate
+   gates*. Each has a different error and a different fix, and clearing one
+   just surfaces the next:
 
    - `ResourceNotFoundException: Model use case details have not been
      submitted` → fill in the Anthropic use case form in the Bedrock console
-     under **Model access**. Self-serve; takes ~15 min to take effect. This
-     unlocks the 4.6-tier models.
+     under **Model access**. Self-serve; takes ~15 min to take effect.
+   - `AccessDeniedException: ... AWS Marketplace actions
+     (aws-marketplace:Subscribe)` → the model needs a Marketplace subscription.
+     Not an IAM problem — it happens as account root. Enable the model on the
+     Bedrock console's **Model access** page, which subscribes it.
    - `AccessDeniedException: <model> is not available for this account` → the
-     account tier doesn't include that model. As of first deploy, this account
-     got that for `opus-5` and `opus-4-8`; contact AWS Sales to change it.
+     account tier doesn't include that model; contact AWS Sales.
 
    Models must be referenced by **inference profile id** (`us.anthropic....`),
-   not the bare foundation model id.
+   not the bare foundation model id, and a guessed id fails as a confusing
+   `ValidationException`. List the real ones:
+
+   ```bash
+   aws bedrock list-inference-profiles --region us-west-1 \
+     --query 'inferenceProfileSummaries[?contains(inferenceProfileId,`anthropic`)].inferenceProfileId'
+   ```
+
+   Working in this account today: `sonnet-4-6` (the default), `sonnet-4-5`,
+   `haiku-4-5`. Blocked: `opus-4-6` (Marketplace), `opus-5`/`4-7`/`4-8` (tier).
 
    To change the model on an already-deployed stack:
    ```bash

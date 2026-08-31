@@ -14,7 +14,11 @@ Parameters:
 
   BedrockModelId:
     Type: String
-    Default: us.anthropic.claude-opus-4-6-v1
+    # sonnet-4-6, not opus-4-6, because opus-4-6 is not actually usable in
+    # this account: it clears the use-case form but then fails on an AWS
+    # Marketplace subscription (see CLAUDE.md). sonnet-4-6 works today and
+    # is a good fit for generating a self-contained HTML fragment.
+    Default: us.anthropic.claude-sonnet-4-6
     Description: >
       Must be an inference profile id (the "us." / "global." prefixed form),
       not a bare foundation model id -- current Claude models on Bedrock are
