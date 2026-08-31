@@ -118,7 +118,7 @@ console password Caleb sent you, pick the `gh-wrapped-dev` cluster).
 |---|---|
 | `AccessDeniedException` on `rds-data` | usually a missing secret permission, not the SQL — ask Caleb |
 | Status stuck on one phase | that Lambda threw; check its logs |
-| `Model use case details have not been submitted` | Bedrock model access, account-level — ask Caleb |
+| Any Bedrock `AccessDenied` / `use case details` / `Marketplace` error | model access is account-level, not your fault — ask Caleb |
 | `ModuleNotFoundError` after adding a package | add it to `lambdas/py/<fn>/requirements.txt`, then `push-fn.py` again |
 | Build fails deleting `build/` on Windows | a terminal is `cd`'d into it; close it |
 
