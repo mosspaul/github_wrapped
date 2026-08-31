@@ -42,7 +42,14 @@ client = boto3.client(
         # read timeout will cut it off mid-response.
         read_timeout=240,
         connect_timeout=10,
-        retries={"max_attempts": 3, "mode": "adaptive"},
+        # generate-slides fires all five slide calls concurrently and shares
+        # one Lambda timeout across them (infra/02-app.yaml). Concurrency
+        # means the worst case is one call's retry ceiling, not five summed --
+        # but that ceiling still has to fit under the Lambda timeout with room
+        # to spare for the DB writes after. At max_attempts=3 a single call
+        # retried on timeouts could reach ~3*240s=720s alone, more than the
+        # function's whole budget; 2 keeps that ceiling to ~480s.
+        retries={"max_attempts": 2, "mode": "adaptive"},
     ),
 )
 
@@ -71,6 +78,15 @@ def complete(system: str, prompt: str, max_tokens: int = 16000) -> str:
         # Adaptive lets the model decide how hard to think per slide -- a
         # language breakdown is trivial, a "coding personality" is not.
         "thinking": {"type": "adaptive"},
+        # Effort defaults to "high" when omitted, and adaptive thinking is not
+        # separately capped -- one slide (commit_activity, in production) has
+        # already spent all 16000 max_tokens thinking and returned zero output
+        # text, burning most of a 240s read timeout for nothing. This is a
+        # single-slide design fragment, not long-horizon agentic work, so it
+        # does not need "high". Bounding effort bounds token spend, which
+        # bounds wall-clock time -- generate-slides runs five of these calls
+        # sequentially inside one Lambda invocation with a shared timeout.
+        "output_config": {"effort": "low"},
     }
 
     try:

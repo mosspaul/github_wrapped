@@ -75,11 +75,19 @@ const TERMINAL: JobStatus[] = ['ready', 'error'];
  *
  * `onProgress` fires on every poll so the UI can show which phase is running --
  * the pipeline takes 30s+ end to end, so showing nothing is not an option.
+ *
+ * timeoutMs must cover the whole pipeline, not just one phase -- it's a
+ * client-side budget on top of three sequential Lambda timeouts (see
+ * infra/02-app.yaml): ingest-github 300s + compute-stats 120s +
+ * generate-slides 600s = 1020s worst case. A shorter client deadline used to
+ * fire while the backend was still legitimately working and report a false
+ * "timed out", even on runs that would have finished. Keep this above the
+ * sum of those three, with room to spare.
  */
 export async function runWrapped(
   handle: string,
   onProgress?: (status: JobStatus) => void,
-  { intervalMs = 2000, timeoutMs = 300_000 }: { intervalMs?: number; timeoutMs?: number } = {},
+  { intervalMs = 2000, timeoutMs = 1_200_000 }: { intervalMs?: number; timeoutMs?: number } = {},
 ): Promise<WrappedPayload> {
   await startWrapped(handle);
 

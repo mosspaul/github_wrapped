@@ -4,6 +4,7 @@ Pipeline step 3: ask Claude for one self-contained HTML fragment per slide.
 This is the last step, so it sets status='ready' and chains to nothing.
 """
 
+import concurrent.futures
 import json
 import traceback
 
@@ -34,9 +35,48 @@ If a stat is null or the payload is marked "placeholder": true, design around \
 what IS present -- say something playful about the missing data rather than \
 fabricating it."""
 
+# Reserve time after the slowest Bedrock call returns (or we give up on it)
+# for the DB writes and status update that still have to happen before the
+# Lambda's own timeout hits. A Lambda timeout is a hard kill, not a raised
+# exception, so @step's except-block never runs and the job is silently
+# orphaned at status='generating' forever if we cut this too close (this
+# happened in production before slides were generated concurrently).
+WRAP_UP_BUFFER_MS = 30_000
+
+
+def _generate_one(handle: str, slide_id: str, stats_by_type: dict) -> tuple[str, str | None]:
+    """Runs on a worker thread. Never raises -- returns (slide_id, html_or_None)."""
+    meta = SLIDE_BY_ID[slide_id]
+    stats = stats_by_type.get(slide_id) or "{}"
+
+    prompt = (
+        f"Slide: {meta['title']}\n"
+        f"Purpose: {meta['blurb']}\n"
+        f"GitHub handle: {handle}\n\n"
+        f"Stats (JSON):\n{_pretty(stats)}\n\n"
+        "Design this slide."
+    )
+
+    # One slide failing should not lose the other four. A slide with
+    # html=NULL is a documented state the front end already handles.
+    try:
+        return slide_id, extract_fragment(complete(SYSTEM, prompt))
+    except Exception as exc:
+        # Log the full chain, not just repr(exc). httpx wraps transport
+        # failures in a generic APIConnectionError whose message ("Connection
+        # error.") says nothing -- the actual DNS/TLS/socket cause is only
+        # visible in __cause__.
+        print(f"slide {slide_id} failed for {handle}: {exc!r}")
+        print(traceback.format_exc())
+        cause = exc.__cause__
+        while cause is not None:
+            print(f"  caused by: {cause!r}")
+            cause = cause.__cause__
+        return slide_id, None
+
 
 @step("generating", chain=False)
-def handler(handle: str) -> dict:
+def handler(handle: str, context) -> dict:
     rows = db.sql(
         "SELECT slide_type, stats_json FROM slides WHERE handle = :handle",
         {"handle": handle},
@@ -46,43 +86,42 @@ def handler(handle: str) -> dict:
     generated = 0
     failed = []
 
-    for slide_id in SLIDE_IDS:
-        meta = SLIDE_BY_ID[slide_id]
-        stats = stats_by_type.get(slide_id) or "{}"
+    # The five slides are independent, so fire all the Bedrock calls at once
+    # instead of waiting on them one at a time -- turns ~5x one call's latency
+    # into ~1x. boto3 clients are safe to share across threads for concurrent
+    # calls (shared/ai.py's `client` is module-scoped for this reason).
+    # wait(..., timeout=...) instead of the pool's own blocking shutdown so a
+    # stuck call can't hold the Lambda past its own timeout: whatever hasn't
+    # returned by the deadline is treated as failed and the pool is abandoned
+    # (not joined) rather than waited on further.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(SLIDE_IDS))
+    futures = {
+        pool.submit(_generate_one, handle, slide_id, stats_by_type): slide_id
+        for slide_id in SLIDE_IDS
+    }
+    budget_s = max(0, (context.get_remaining_time_in_millis() - WRAP_UP_BUFFER_MS) / 1000)
+    done, not_done = concurrent.futures.wait(futures, timeout=budget_s)
+    pool.shutdown(wait=False)
 
-        prompt = (
-            f"Slide: {meta['title']}\n"
-            f"Purpose: {meta['blurb']}\n"
-            f"GitHub handle: {handle}\n\n"
-            f"Stats (JSON):\n{_pretty(stats)}\n\n"
-            "Design this slide."
-        )
+    for future in not_done:
+        slide_id = futures[future]
+        print(f"gave up waiting on slide {slide_id} for {handle}: still running in background")
+        failed.append(slide_id)
 
-        # One slide failing should not lose the other four. A slide with
-        # html=NULL is a documented state the front end already handles.
-        try:
-            html = extract_fragment(complete(SYSTEM, prompt))
-            db.sql(
-                """
-                INSERT INTO slides (handle, slide_type, html)
-                VALUES (:handle, :slide_type, :html)
-                ON DUPLICATE KEY UPDATE html = VALUES(html)
-                """,
-                {"handle": handle, "slide_type": slide_id, "html": html},
-            )
-            generated += 1
-        except Exception as exc:
-            # Log the full chain, not just repr(exc). httpx wraps transport
-            # failures in a generic APIConnectionError whose message ("Connection
-            # error.") says nothing -- the actual DNS/TLS/socket cause is only
-            # visible in __cause__.
-            print(f"slide {slide_id} failed for {handle}: {exc!r}")
-            print(traceback.format_exc())
-            cause = exc.__cause__
-            while cause is not None:
-                print(f"  caused by: {cause!r}")
-                cause = cause.__cause__
+    for future in done:
+        slide_id, html = future.result()
+        if html is None:
             failed.append(slide_id)
+            continue
+        db.sql(
+            """
+            INSERT INTO slides (handle, slide_type, html)
+            VALUES (:handle, :slide_type, :html)
+            ON DUPLICATE KEY UPDATE html = VALUES(html)
+            """,
+            {"handle": handle, "slide_type": slide_id, "html": html},
+        )
+        generated += 1
 
     if generated == 0:
         # Nothing rendered at all -- that is a real failure, so let @step record
@@ -90,7 +129,7 @@ def handler(handle: str) -> dict:
         raise RuntimeError(f"every slide failed to generate: {failed}")
 
     db.set_status(handle, "ready")
-    print(f"generated {generated}/{len(SLIDE_IDS)} slides for {handle}")
+    print(f"generated {generated}/{len(SLIDE_IDS)} slides for {handle} (failed={failed})")
     return {"handle": handle, "generated": generated, "failed": failed}
 
 

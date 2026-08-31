@@ -19,8 +19,25 @@ export const handler = async (
     const handle = event.pathParameters?.handle;
     if (!validHandle(handle)) return badRequest('invalid handle');
 
-    // Reset to pending on every request so a re-run of a previously failed or
-    // stale handle starts from a clean state rather than showing the old result.
+    // A full run re-fetches from GitHub and makes five sequential-ish Bedrock
+    // calls -- real latency even at best. If this handle already finished,
+    // skip straight back to the front end instead of redoing all of that, so
+    // re-showing a handle (a repeat demo, a double-click) is instant rather
+    // than a full re-run. ?refresh=true bypasses this and forces a clean run.
+    const forceRefresh = event.queryStringParameters?.refresh === 'true';
+    if (!forceRefresh) {
+      const existing = await sql<{ status: string }>(
+        `SELECT status FROM wrapped_jobs WHERE handle = :handle`,
+        { handle },
+      );
+      if (existing[0]?.status === 'ready') {
+        return accepted({ handle, status: 'ready' });
+      }
+    }
+
+    // Reset to pending on every other request so a re-run of a previously
+    // failed or stale handle starts from a clean state rather than showing
+    // the old result.
     await sql(
       `INSERT INTO wrapped_jobs (handle, status, error)
        VALUES (:handle, 'pending', NULL)

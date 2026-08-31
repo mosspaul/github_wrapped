@@ -6,7 +6,7 @@ Context for Claude Code working in this repo.
 > change something it describes, update it in the same commit. See
 > [Keeping this current](#keeping-this-current) at the bottom for what counts.
 >
-> Last verified against a real deploy: **2026-08-31**.
+> Last verified against a real deploy: **2026-08-31** (evening).
 
 ## What this is
 
@@ -72,7 +72,18 @@ invocations, **a raised exception goes nowhere a user can see** — writing
 `status='error'` is the only way a failure surfaces. `shared/pipeline.py`'s
 `@step` decorator handles that; use it rather than hand-rolling try/except.
 
-All writes are upserts, so any handle can be re-run from scratch.
+All writes are upserts, so any handle can be re-run from scratch. `POST
+/wrapped/{handle}` short-circuits that: if the handle is already
+`status='ready'`, it returns immediately without touching the pipeline at all
+(pass `?refresh=true` to force a real re-run). This exists so a repeat demo of
+the same handle is instant instead of a full re-run — see `CONTRACTS.md`.
+
+`generate-slides` fires its five Bedrock calls **concurrently** (a thread pool,
+bounded by `context.get_remaining_time_in_millis()`), not one at a time — see
+the gotcha below. A Lambda timeout is a hard kill that `@step`'s except-block
+never sees, so a step that might run long has to police its own wall-clock
+budget and finish (successfully or with `status='error'`) before that timeout,
+not rely on the exception path.
 
 ## Commands
 
@@ -218,6 +229,37 @@ build working correctly.
 `aws logs tail` from PowerShell. And `build/` can be locked by a shell that is
 `cd`'d into it; `clean()` retries and then says so.
 
+**A Lambda timeout can orphan a job forever, and adaptive thinking made it
+easy to hit one.** `generate-slides` used to call Bedrock for its five slides
+one at a time inside a single 300s Lambda invocation. In production, one slide
+spent its entire `max_tokens` budget on thinking and returned zero output text
+(`output_tokens: 16000, thinking_tokens: 16000` — nothing left for the actual
+answer); by the time a later slide was mid-call the function hit its own 300s
+timeout and was hard-killed. That's not a raised exception, so `@step`'s
+except-block never ran, and the job sat at `status='generating'` forever with
+nothing to retry it. Fix was three-part, all still true and all load-bearing:
+`shared/ai.py` sets `"output_config": {"effort": "low"}` so one slide can't
+burn its whole budget on thinking (effort is GA on Bedrock, confirmed via
+`shared/platform-availability.md` in the claude-api skill — don't reach for
+the deprecated `budget_tokens` escape hatch instead); `generate-slides`
+fires all five calls concurrently via a thread pool bounded by
+`context.get_remaining_time_in_millis()` so total wall-clock is ~1x one call's
+latency instead of 5x, and gives up on (not blocks on) whatever hasn't
+returned by its own deadline; `GenerateSlidesFn`'s timeout went 300s → 600s and
+Bedrock retries went `max_attempts: 3` → `2`, so one call's worst case
+(read_timeout × attempts) still fits under the Lambda timeout with room for the
+DB writes after. Verified: a real `octocat` run after all three landed —
+22.9s for `generate-slides`, 5/5 slides, thinking tokens 19–29 (was 16000).
+
+**The AWS CLI's configured default region is not this project's region.**
+`aws configure get region` on this machine returns `us-east-1`; this project
+is `us-west-1` (see Stack, above). `scripts/deploy.py` and `push-fn.py` only
+use `us-west-1` if you pass `--region us-west-1` — without it they fail with
+`ValidationError: Stack with id gh-wrapped-<stage>-bootstrap does not exist`,
+which reads like a stack that was never deployed rather than a region miss.
+Always pass `--region us-west-1` explicitly, or `aws configure set region
+us-west-1` once for this machine.
+
 **The account's root `login_session` credential provider refreshes
 unreliably** — long-polling calls (CloudFormation waiters) fail intermittently
 with `CreateOAuth2Token ... authorization grant is invalid`. It has silently
@@ -243,11 +285,16 @@ corrupted test results before. If AWS results look self-contradictory, re-run
 Deployed and working in us-west-1: bootstrap, data (6 tables), app (6 Lambdas +
 HTTP API at `https://ap4n9q6iei.execute-api.us-west-1.amazonaws.com`).
 
-**The full pipeline runs green.** All six functions verified against real data:
-`octocat` goes pending -> ingesting -> computing -> generating -> ready and
-returns five slides with model-authored HTML (5-9KB each, no `<script>`),
-ordered by `slide-types.json` rather than by what the database happened to
-return. Bedrock logs real token usage against `us.anthropic.claude-sonnet-4-6`.
+**The full pipeline runs green, and reliably fast now.** All six functions
+verified against real data: `octocat` goes pending -> ingesting -> computing ->
+generating -> ready and returns five slides with model-authored HTML (5-9KB
+each, no `<script>`), ordered by `slide-types.json` rather than by what the
+database happened to return. Bedrock logs real token usage against
+`us.anthropic.claude-sonnet-4-6`. A cold run finishes in well under a minute
+(`generate-slides` itself: 22.9s, 5/5 slides) since slide generation went
+concurrent and effort-capped; a repeat run of an already-`ready` handle
+returns in a couple seconds via the `POST /wrapped/{handle}` fast path. See
+the "Lambda timeout can orphan a job" gotcha above for what this replaced.
 
 All five stacks are deployed. The site is live at
 `https://main.d2uskcsztnslls.amplifyapp.com`, serving the real API URL and with

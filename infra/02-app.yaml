@@ -264,8 +264,12 @@ Resources:
       Handler: handler.handler
       Role: !GetAtt GenerateSlidesRole.Arn
       Code: ../build/generate-slides
-      # Five sequential Bedrock calls with thinking on. Do not trim this.
-      Timeout: 300
+      # Five Bedrock calls run concurrently (handler.py), so wall-clock time
+      # is bounded by one call's worst case, not five summed -- but that
+      # worst case (240s read timeout x 2 retries, shared/ai.py) is still
+      # ~480s, plus buffer for the DB writes after. Don't trim this close to
+      # that number.
+      Timeout: 600
       MemorySize: 1024
       Environment:
         Variables:

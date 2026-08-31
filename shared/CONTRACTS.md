@@ -18,10 +18,18 @@ Base URL is the `ApiEndpoint` output of the `gh-wrapped-<stage>-app` stack.
 CORS is wide open (`*`) because this is a demo. Do not copy that to anything real.
 
 ### `POST /wrapped/{handle}`
-Starts (or restarts) a wrapped run. Returns immediately; the work happens async.
+Starts a wrapped run. Returns immediately; the work happens async.
+
+If this handle already finished (`status = 'ready'`), this **skips the run**
+and returns the ready status directly instead of re-fetching from GitHub and
+re-generating slides — a repeat request for a finished handle is meant to be
+near-instant. Pass `?refresh=true` to force a real re-run regardless of
+current status (this is also what a failed/stale handle gets automatically —
+only `ready` short-circuits).
 
 ```
-202 { "handle": "octocat", "status": "pending" }
+202 { "handle": "octocat", "status": "pending" }   // fresh run started
+202 { "handle": "octocat", "status": "ready" }     // already done, no run started
 400 { "error": "invalid handle" }
 ```
 
