@@ -118,9 +118,6 @@ aws logs tail /aws/lambda/gh-wrapped-dev-compute-stats --follow
 > rewrites the leading `/aws/lambda/...` into a Windows path and the command
 > fails with an unhelpful `logGroupName` validation error.
 
-```bash
-```
-
 **Changed the schema?** Edit `db/schema.sql`, then:
 
 ```bash
