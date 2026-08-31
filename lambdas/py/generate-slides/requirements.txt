@@ -1,5 +1,3 @@
 -r ../requirements-base.txt
-# Pulls in boto3 as a transitive dep (Bedrock request signing), which is why
-# this bundle is ~45MB while the others are tiny. Under the 250MB unzipped
-# limit, so not worth fighting.
-anthropic[bedrock]==1.2.0
+# Nothing to vendor: shared/ai.py calls Bedrock through the runtime's boto3.
+# See the header of shared/ai.py for why the anthropic SDK is not used here.

@@ -5,6 +5,7 @@ This is the last step, so it sets status='ready' and chains to nothing.
 """
 
 import json
+import traceback
 
 from shared import db
 from shared.ai import complete
@@ -71,7 +72,16 @@ def handler(handle: str) -> dict:
             )
             generated += 1
         except Exception as exc:
+            # Log the full chain, not just repr(exc). httpx wraps transport
+            # failures in a generic APIConnectionError whose message ("Connection
+            # error.") says nothing -- the actual DNS/TLS/socket cause is only
+            # visible in __cause__.
             print(f"slide {slide_id} failed for {handle}: {exc!r}")
+            print(traceback.format_exc())
+            cause = exc.__cause__
+            while cause is not None:
+                print(f"  caused by: {cause!r}")
+                cause = cause.__cause__
             failed.append(slide_id)
 
     if generated == 0:

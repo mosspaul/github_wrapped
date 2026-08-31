@@ -93,6 +93,17 @@ def main() -> None:
         default=None,
         help="PAT with repo scope, required the first time the web stack deploys",
     )
+    p.add_argument(
+        "--bedrock-model",
+        default=None,
+        help=(
+            "Inference profile id for generate-slides, e.g. "
+            "us.anthropic.claude-opus-4-6-v1. NOTE: editing the Default in "
+            "02-app.yaml does NOT change an existing stack -- CloudFormation "
+            "reuses the value a parameter was last deployed with, so you have "
+            "to pass it here to actually change it."
+        ),
+    )
     args = p.parse_args()
 
     # `access` is deliberately not in the default set: it creates account-wide
@@ -108,6 +119,8 @@ def main() -> None:
             continue
 
         params: list[str] = []
+        if key == "app" and args.bedrock_model:
+            params.append(f"BedrockModelId={args.bedrock_model}")
         if key == "web":
             if args.github_token:
                 params.append(f"GithubAccessToken={args.github_token}")

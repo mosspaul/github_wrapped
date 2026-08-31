@@ -54,13 +54,34 @@ changes. Don't.
 You need the AWS CLI, Node 22, and Python 3.11+.
 
 ```bash
+python -m pip install -r requirements-dev.txt   # boto3 for scripts/ and db/migrate.py
+```
+
+```bash
 aws sso login                     # this repo's default profile is SSO
 aws sts get-caller-identity       # confirm you're in the right account
 ```
 
-1. **Enable Bedrock model access** — one-time, manual, in the Bedrock console
-   for your region. Until you do, `generate-slides` fails with
-   `AccessDeniedException` and nothing in the logs explains why.
+1. **Bedrock model access** — one-time, manual, and there are *two separate
+   gates* with different error messages:
+
+   - `ResourceNotFoundException: Model use case details have not been
+     submitted` → fill in the Anthropic use case form in the Bedrock console
+     under **Model access**. Self-serve; takes ~15 min to take effect. This
+     unlocks the 4.6-tier models.
+   - `AccessDeniedException: <model> is not available for this account` → the
+     account tier doesn't include that model. As of first deploy, this account
+     got that for `opus-5` and `opus-4-8`; contact AWS Sales to change it.
+
+   Models must be referenced by **inference profile id** (`us.anthropic....`),
+   not the bare foundation model id.
+
+   To change the model on an already-deployed stack:
+   ```bash
+   python scripts/deploy.py --only app --bedrock-model us.anthropic.claude-opus-5
+   ```
+   Editing the `Default:` in `02-app.yaml` is **not** enough — CloudFormation
+   reuses the value a parameter was last deployed with.
 
 2. **Create two GitHub PATs** (they are genuinely different tokens):
    - `public_repo` — the app reads public GitHub data with this
@@ -91,6 +112,13 @@ aws sts get-caller-identity       # confirm you're in the right account
 ```bash
 python scripts/push-fn.py compute-stats
 aws logs tail /aws/lambda/gh-wrapped-dev-compute-stats --follow
+```
+
+> On Windows, run `aws logs tail` from **PowerShell**, not Git Bash. Git Bash
+> rewrites the leading `/aws/lambda/...` into a Windows path and the command
+> fails with an unhelpful `logGroupName` validation error.
+
+```bash
 ```
 
 **Changed the schema?** Edit `db/schema.sql`, then:

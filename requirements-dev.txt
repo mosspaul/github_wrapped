@@ -1,0 +1,12 @@
+# Local tooling for scripts/ and db/migrate.py. Not deployed to Lambda --
+# the runtime provides boto3 there, and Lambda dependencies live in
+# lambdas/py/<function>/requirements.txt.
+#
+#   python -m pip install -r requirements-dev.txt
+boto3>=1.35
+
+# Required by botocore's "login" credential provider, which is what backs the
+# `aws login` / root login_session profile style. Without it boto3 raises
+# MissingDependencyException before it ever reaches AWS. Harmless if you
+# authenticate some other way (SSO, static keys).
+botocore[crt]>=1.35

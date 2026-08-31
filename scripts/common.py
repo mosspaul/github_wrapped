@@ -4,6 +4,7 @@ import json
 import pathlib
 import shutil
 import subprocess
+import time
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -75,6 +76,26 @@ def stack_outputs(stage: str, suffix: str, profile: str | None = None,
 
 
 def clean(path: pathlib.Path) -> None:
-    if path.exists():
-        shutil.rmtree(path)
+    """
+    Empty a build directory.
+
+    Windows locks a directory that any process has open as its working
+    directory (a stray shell, an editor, an antivirus scan), and rmtree then
+    fails with WinError 32. Retrying clears the transient cases; if the lock
+    persists, say which directory is stuck rather than dumping a shutil
+    traceback that does not name the real problem.
+    """
+    for attempt in range(3):
+        try:
+            if path.exists():
+                shutil.rmtree(path)
+            break
+        except PermissionError:
+            if attempt == 2:
+                sys.exit(
+                    f"cannot delete {path} -- something is holding it open.\n"
+                    "On Windows this is usually a terminal cd'd into that "
+                    "directory, or an editor with a file from it open."
+                )
+            time.sleep(1)
     path.mkdir(parents=True, exist_ok=True)

@@ -14,11 +14,23 @@ Parameters:
 
   BedrockModelId:
     Type: String
-    Default: anthropic.claude-opus-5
+    Default: us.anthropic.claude-opus-4-6-v1
     Description: >
-      Model access must be enabled once, by hand, in the Bedrock console for
-      this region. Until then every generate-slides invocation fails with
-      AccessDeniedException.
+      Must be an inference profile id (the "us." / "global." prefixed form),
+      not a bare foundation model id -- current Claude models on Bedrock are
+      only invokable through a profile.
+
+      Two separate gates, with two different error messages:
+        ResourceNotFoundException "Model use case details have not been
+        submitted" -> fill in the use case form in the Bedrock console under
+        Model access. Self-serve, unlocks the 4.6-tier models.
+        AccessDeniedException "<model> is not available for this account"
+        -> the account tier does not include that model; contact AWS Sales.
+
+      us.anthropic.claude-opus-5 is the preferred model and is a one-parameter
+      change here, but it returned "not available for this account" on this
+      account as of the initial deploy. 4.6 is the most capable tier that the
+      self-serve form unlocks.
 
   LogRetentionDays:
     Type: Number
