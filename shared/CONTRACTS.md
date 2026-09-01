@@ -69,7 +69,10 @@ The payload the slide deck renders.
     {
       "slideType": "languages",
       "title": "Languages",
-      "stats": { "top": [{ "language": "Python", "bytes": 91234 }] },
+      // stats is whatever compute-stats wrote, passed through verbatim --
+      // its keys stay snake_case while the fields around it are camelCase.
+      "stats": { "basis": "bytes",
+                 "top": [{ "language": "Python", "bytes": 91234, "repo_count": 4 }] },
       "html": "<section class=\"...\">...</section>",
       "generatedAt": "2026-08-31T18:05:01.000Z"
     }
@@ -114,4 +117,6 @@ exists. Keep those ALTERs idempotent or drop the dev tables and re-migrate.
 
 Access is via the RDS Data API — no MySQL socket, no VPC. Use `sql()` from
 `lambdas/ts/shared/dataApi.ts` or `lambdas/py/shared/db.py` rather than calling
-`rds-data` directly.
+`rds-data` directly. For the same statement over many rows, Python also has
+`db.sql_batch(statement, param_sets)` — one Data API call instead of one per
+row. Prefer it in the pipeline steps; a per-row loop is a round trip per row.

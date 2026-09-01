@@ -17,24 +17,24 @@ from shared.ai import complete
 
 
 def _languages(handle: str) -> dict:
+    # Bytes, not repo count -- "language breakdown by bytes written" is what
+    # slide-types.json promises and what CONTRACTS.md documents. Forks are
+    # excluded here as well as in ingest, so this stays right even if an older
+    # run left fork rows in repo_languages.
     rows = db.sql(
         """
-        SELECT r.primary_language AS language, COUNT(*) AS repo_count,
-               SUM(r.stars) AS stars
-          FROM repos r
-         WHERE r.handle = :handle
-           AND r.primary_language IS NOT NULL
-           AND r.is_fork = 0
-         GROUP BY r.primary_language
-         ORDER BY repo_count DESC
+        SELECT rl.language, CAST(SUM(rl.bytes) AS SIGNED) AS bytes,
+               COUNT(*) AS repo_count
+          FROM repo_languages rl
+          JOIN repos r ON r.id = rl.repo_id
+         WHERE r.handle = :handle AND r.is_fork = 0
+         GROUP BY rl.language
+         ORDER BY bytes DESC
          LIMIT 8
         """,
         {"handle": handle},
     )
-    # NOTE: this counts repos per language, not bytes. Once ingest populates
-    # repo_languages, switch to SUM(bytes) -- that is the number the slide
-    # copy actually promises.
-    return {"top": rows, "basis": "repo_count"}
+    return {"top": rows, "basis": "bytes"}
 
 
 def _standout_projects(handle: str) -> dict:
@@ -55,7 +55,11 @@ def _commit_activity(handle: str) -> dict:
     # Requires ingest's EXTENSION POINT 2 (commit_history) to be populated.
     rows = db.sql(
         """
-        SELECT ch.commit_date AS commit_date, SUM(ch.commit_count) AS commits
+        -- CAST, because MySQL's SUM() is a DECIMAL and the Data API serialises
+        -- DECIMAL as a JSON *string* to keep precision. Without it `commits`
+        -- arrives as "42" and sum() raises int + str. See CLAUDE.md.
+        SELECT ch.commit_date AS commit_date,
+               CAST(SUM(ch.commit_count) AS SIGNED) AS commits
           FROM commit_history ch
           JOIN repos r ON r.id = ch.repo_id
          WHERE r.handle = :handle
@@ -67,7 +71,7 @@ def _commit_activity(handle: str) -> dict:
     )
 
     if not rows:
-        return {"total commits": 0, "busiest_day": None, "longest_streak_days": 0}
+        return {"total_commits": 0, "busiest_day": None, "longest_streak_days": 0}
 
     total_commits = sum(r["commits"]for r in rows)
     busiest = max(rows, key=lambda r: r["commits"])
@@ -222,7 +226,7 @@ def _year_in_code(handle: str) -> dict:
 
     activity_rows = db.sql(
         """
-        SELECT SUM(ch.commit_count) AS total_commits,
+        SELECT CAST(SUM(ch.commit_count) AS SIGNED) AS total_commits,
                COUNT(DISTINCT ch.repo_id) AS repos_edited
           FROM commit_history ch
           JOIN repos r ON r.id = ch.repo_id
@@ -234,8 +238,11 @@ def _year_in_code(handle: str) -> dict:
 
     activity = activity_rows[0] if activity_rows else {}
 
-    if not repo_rows or activity_rows:
-        return{ "repos_created_this_year": 0, "repos_eddited_this_year": 0, "total commits": 0}
+    # Only repo_rows is worth guarding: an aggregate SELECT always returns one
+    # row, so `activity_rows` is never empty even with no commit_history at all
+    # (it comes back as {"total_commits": null, "repos_edited": 0}).
+    if not repo_rows:
+        return {"repos_created_this_year": 0, "repos_edited_this_year": 0, "total_commits": 0}
 
     return {
         "repos_created_this_year": repo_rows[0]["repos_created"],
