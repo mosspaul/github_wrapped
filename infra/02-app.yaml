@@ -73,6 +73,25 @@ Resources:
             Resource:
               Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-secret-arn'
 
+  # Two functions call Claude now (generate-slides for the HTML, compute-stats
+  # for the coding_personality archetype), so this follows DataAccessPolicy's
+  # reasoning: one place to fix a missing permission rather than copies that
+  # drift apart.
+  BedrockAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'gh-wrapped-${Stage}-bedrock-access'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            # Inference profiles and cross-region routing mean the ARN we
+            # actually hit isn't reliably predictable; scope by service.
+            Resource: '*'
+
   # =========================================================================
   # Roles - one per function, so a runaway function can't do a neighbour's job
   # =========================================================================
@@ -133,6 +152,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - !Ref DataAccessPolicy
+        - !Ref BedrockAccessPolicy
       Policies:
         - PolicyName: invoke-next
           PolicyDocument:
@@ -149,18 +169,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - !Ref DataAccessPolicy
-      Policies:
-        - PolicyName: bedrock
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - bedrock:InvokeModel
-                  - bedrock:InvokeModelWithResponseStream
-                # Inference profiles and cross-region routing mean the ARN we
-                # actually hit isn't reliably predictable; scope by service.
-                Resource: '*'
+        - !Ref BedrockAccessPolicy
 
   # =========================================================================
   # Functions
@@ -243,7 +252,15 @@ Resources:
       Handler: handler.handler
       Role: !GetAtt ComputeStatsRole.Arn
       Code: ../build/compute-stats
-      Timeout: 120
+      # Was 120s, which was right while this step was pure SQL. It now makes a
+      # Bedrock call for coding_personality, and that call's worst case is
+      # ~480s (240s read timeout x 2 attempts, shared/ai.py). A Lambda timeout
+      # is a hard kill that @step's except-block never sees, so a ceiling above
+      # the function's own budget would strand the job at status='computing'
+      # forever -- the exact failure that already bit generate-slides. The
+      # timeout has to sit above the Bedrock ceiling, not above the typical
+      # case. Billing is by actual duration, so the headroom is free.
+      Timeout: 600
       MemorySize: 1024
       Environment:
         Variables:
@@ -254,6 +271,7 @@ Resources:
             Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-secret-arn'
           DB_NAME:
             Fn::ImportValue: !Sub 'gh-wrapped-${Stage}-db-name'
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
           NEXT_FN: !Sub 'gh-wrapped-${Stage}-generate-slides'
 
   GenerateSlidesFn:
