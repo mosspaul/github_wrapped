@@ -51,11 +51,8 @@ class GithubError(RuntimeError):
     pass
 
 
-def get(path: str, **params: Any) -> Any:
-    """GET one resource. Raises GithubError with a useful message on failure."""
-    url = path if path.startswith("http") else f"{API}{path}"
-    res = session.get(url, params=params, timeout=_TIMEOUT)
-
+def _raise_for_status(res: "requests.Response", path: str) -> None:
+    """Turn a failed response into a GithubError that says something useful."""
     if res.status_code == 404:
         raise GithubError(f"not found: {path}")
 
@@ -75,6 +72,36 @@ def get(path: str, **params: Any) -> Any:
     if not res.ok:
         raise GithubError(f"{res.status_code} on {path}: {res.text[:200]}")
 
+
+def get(path: str, **params: Any) -> Any:
+    """GET one resource. Raises GithubError with a useful message on failure."""
+    url = path if path.startswith("http") else f"{API}{path}"
+    res = session.get(url, params=params, timeout=_TIMEOUT)
+    _raise_for_status(res, path)
+    return res.json()
+
+
+def get_stats(path: str) -> list | None:
+    """
+    GET one of the /stats/ endpoints, which GitHub computes asynchronously.
+
+    These do not behave like the rest of the API and plain get() cannot be used
+    on them -- both of the codes below carry an EMPTY body, so .json() raises:
+
+      * 202 -- "still building the cache, ask again". Returns None; the caller
+        decides when to retry. Deliberately does not sleep here, so a caller
+        with many repos can retry them as a group instead of stalling once per
+        repo.
+      * 204 -- the repo genuinely has no commits. Returns [].
+    """
+    res = session.get(f"{API}{path}", timeout=_TIMEOUT)
+
+    if res.status_code == 202:
+        return None
+    if res.status_code == 204:
+        return []
+
+    _raise_for_status(res, path)
     return res.json()
 
 
