@@ -1,9 +1,10 @@
 """
 Pipeline step 2: turn raw rows into one stats blob per slide.
 
-STUB. `languages` and `standout_projects` are genuinely computed from what the
-ingest step already stores; the other three return placeholder shapes so the
-pipeline completes. Each builder is independent -- claim one and fill it in.
+All five builders compute real stats from what the ingest step stores (or, for
+`coding_personality`, a Bedrock call over those stats). Each builder is
+independent. `coding_personality` fails soft to a `placeholder: true` shape on
+a Bedrock error so one bad call doesn't kill the run -- see CLAUDE.md.
 
 To add a slide: add it to shared/slide-types.json, then add a builder here with
 a matching key. A missing builder is a loud KeyError, not a silent skip.
