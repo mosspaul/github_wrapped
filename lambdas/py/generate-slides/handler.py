@@ -7,6 +7,7 @@ This is the last step, so it sets status='ready' and chains to nothing.
 import concurrent.futures
 import json
 import traceback
+from datetime import datetime, timezone
 
 from shared import db
 from shared.ai import complete
@@ -14,8 +15,21 @@ from shared.html import extract_fragment
 from shared.pipeline import step
 from shared.slides import SLIDE_BY_ID, SLIDE_IDS
 
-SYSTEM = """You design single slides for "GitHub Wrapped", a Spotify-Wrapped-style \
+# The model's training cutoff is well before whenever this actually runs, so
+# left to itself it drifts to a stale, plausible-looking year (it has written
+# "2024" on slides in production). Told the real date explicitly, it grounds
+# "this year" / "your year in review" copy correctly instead of guessing from
+# memory -- see the CLAUDE.md note on this.
+TODAY = datetime.now(timezone.utc).date()
+
+SYSTEM = f"""You design single slides for "GitHub Wrapped", a Spotify-Wrapped-style \
 recap of a developer's year on GitHub.
+
+Today's real-world date is {TODAY.isoformat()} (year {TODAY.year}). Your training \
+data has an earlier cutoff and is NOT a reliable source for the current date -- if \
+a slide mentions "this year", a year number, or anything else date-relative, use \
+{TODAY.year} (or the "year" field in the stats, when present), never a year \
+recalled from memory or training data.
 
 Return ONE self-contained HTML fragment and nothing else. No explanation, no \
 markdown fences, no <html>, <head> or <body>.

@@ -1,19 +1,22 @@
 """
 Pipeline step 2: turn raw rows into one stats blob per slide.
 
-STUB. `languages` and `standout_projects` are genuinely computed from what the
-ingest step already stores; the other three return placeholder shapes so the
-pipeline completes. Each builder is independent -- claim one and fill it in.
+All five builders compute real stats from what the ingest step stores (or, for
+`coding_personality`, a Bedrock call over those stats). Each builder is
+independent. `coding_personality` fails soft to a `placeholder: true` shape on
+a Bedrock error so one bad call doesn't kill the run -- see CLAUDE.md.
 
 To add a slide: add it to shared/slide-types.json, then add a builder here with
 a matching key. A missing builder is a loud KeyError, not a silent skip.
 """
 
+import json
+from datetime import date
+
 from shared import db
+from shared.ai import complete
 from shared.pipeline import step
 from shared.slides import SLIDE_IDS
-from datetime import date
-from shared.ai import complete
 
 
 def _languages(handle: str) -> dict:
@@ -135,7 +138,8 @@ def _strip_fences(text: str) -> str:
 def _coding_personality(handle: str) -> dict:
     day_rows = db.sql(
         """
-        SELECT ch.commit_date AS commit_date, SUM(ch.commit_count) AS commits
+        SELECT ch.commit_date AS commit_date,
+               CAST(SUM(ch.commit_count) AS SIGNED) AS commits
           FROM commit_history ch
           JOIN repos r ON r.id = ch.repo_id
          WHERE r.handle = :handle
@@ -145,12 +149,16 @@ def _coding_personality(handle: str) -> dict:
         """,
         {"handle": handle},
     )
+    # Every SUM/AVG needs its cast: both are DECIMAL, which the Data API hands
+    # back as a JSON string. SIGNED for the integer total, DOUBLE for the
+    # average -- SIGNED would truncate 0.0667 to 0. COUNT() is already a
+    # number. See the SUM() gotcha in CLAUDE.md.
     repo_rows = db.sql(
         """
         SELECT COUNT(*) AS repo_count,
-               SUM(is_fork) AS fork_count,
+               CAST(SUM(is_fork) AS SIGNED) AS fork_count,
                COUNT(DISTINCT primary_language) AS language_count,
-               AVG(stars) AS avg_stars
+               CAST(AVG(stars) AS DOUBLE) AS avg_stars
           FROM repos
          WHERE handle = :handle
         """,
@@ -242,9 +250,10 @@ def _year_in_code(handle: str) -> dict:
     # row, so `activity_rows` is never empty even with no commit_history at all
     # (it comes back as {"total_commits": null, "repos_edited": 0}).
     if not repo_rows:
-        return {"repos_created_this_year": 0, "repos_edited_this_year": 0, "total_commits": 0}
+        return {"year": date.today().year, "repos_created_this_year": 0, "repos_edited_this_year": 0, "total_commits": 0}
 
     return {
+        "year": date.today().year,
         "repos_created_this_year": repo_rows[0]["repos_created"],
         "repos_edited_this_year": activity.get("repos_edited"),
         "total_commits": activity.get("total_commits"),

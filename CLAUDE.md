@@ -14,9 +14,11 @@ A hackathon demo: "Spotify Wrapped for GitHub". A user enters a GitHub handle;
 we pull their public data, compute a fixed set of stats, ask Claude to design an
 HTML slide for each, and play it back as a deck.
 
-Several people work on this at once. Most Lambdas are **working stubs**, not
-finished logic — they return plausible data so the whole pipeline runs end to
-end while people fill in the pieces independently.
+Several people work on this at once. The Lambdas started as **working stubs**
+returning plausible data so the whole pipeline ran end to end while people
+filled in the pieces independently; as of 2026-08-31 all six are real, and all
+five slides compute from real GitHub data. Expect the stub-era scaffolding
+(placeholder shapes, fail-soft fallbacks) to still be present in places.
 
 ## Stack
 
@@ -301,6 +303,18 @@ cause except the real one; re-run `aws sts get-caller-identity` and repeat the
 test before believing them, and before concluding anyone needs to re-login.
 `botocore[crt]` in `requirements-dev.txt` is required by that provider.
 
+**Slide HTML said "2024" on stage.** The model has no way to know the real
+current date — its training cutoff is well behind whenever the Lambda actually
+runs — so `generate-slides` left to itself drifted to a plausible-but-stale
+year when a slide's copy referenced "this year" or a year number. Fixed two
+ways, both in `lambdas/py`: `generate-slides/handler.py`'s `SYSTEM` prompt now
+states the real UTC date and year explicitly and tells the model never to
+recall a year from memory; `compute-stats/handler.py`'s `_year_in_code` now
+puts an explicit `"year"` field in the stats it writes, so the slide has a real
+number to use instead of inferring "this year" itself. Same failure mode would
+hit any future prompt that asks the model to reason about "now" — give it the
+date, don't assume it knows.
+
 ## Conventions
 
 - Named SQL parameters always (`:handle`), never string interpolation.
@@ -359,8 +373,37 @@ knowing before quoting them on stage:
   weeks, `year_in_code` is the calendar year to date — so they legitimately
   disagree (223 vs 71 for `dougalcaleb`). Not a bug, but it looks like one.
 
-`coding_personality` is the last placeholder; see the extension-point comment in
-`ingest-github/handler.py` for why hour-of-day needs a different source.
+`coding_personality` is real too, and it is the one stats builder that calls
+Claude: it feeds aggregate signals (commit totals, active days, weekend share,
+language count, fork count) to Bedrock and gets back an archetype plus three
+traits. Verified: "Focused Builder" for `dougalcaleb`, traits grounded in the
+actual numbers, 296 in / 42 out tokens on `us.anthropic.claude-sonnet-4-6`.
+
+**So two functions now call Bedrock, not one.** Consequences that are
+load-bearing:
+- `BedrockAccessPolicy` is a shared managed policy attached to both
+  `GenerateSlidesRole` and `ComputeStatsRole`, for the same reason
+  `DataAccessPolicy` is shared.
+- `ComputeStatsFn` needs `BEDROCK_MODEL_ID`. Without it `shared/ai.py` falls
+  back to its own opus-4-6 default, which this account cannot use, and the
+  slide silently degrades to its placeholder.
+- `ComputeStatsFn`'s timeout went 120s → 600s. One Bedrock call's worst case is
+  ~480s (240s read timeout x 2 attempts) and a Lambda timeout is a hard kill
+  `@step` never sees, so a ceiling under that would strand the job at
+  `status='computing'`. Typical runs are ~2.5s; the headroom is a safety
+  ceiling, and Lambda bills actual duration so it costs nothing.
+- `web/src/api.ts`'s client-side `timeoutMs` is a budget over the sum of the
+  three Lambda timeouts, so it moved 1_200_000 → 1_800_000 with it. **If you
+  change a pipeline function's timeout, change that number too** or the client
+  reports a false "timed out" on runs the backend would have finished.
+
+The builder fails soft: any Bedrock error is caught and returns the
+`placeholder: true` shape rather than failing the run, so a Bedrock outage
+costs one slide's flavour text, not the deck. It is still a second model call
+on the critical path, which is worth remembering when a run is slow.
+
+`ingest-github`'s remaining extension point is hour-of-day data; see the
+comment there for why `/stats/commit_activity` cannot supply it.
 
 `gh-wrapped/dev/github-pat` is populated as of 2026-08-31, so ingest runs
 authenticated at 5,000 req/hr. This matters more than it used to: a run cost 3
