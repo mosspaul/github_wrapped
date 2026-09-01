@@ -9,11 +9,13 @@ To add a slide: add it to shared/slide-types.json, then add a builder here with
 a matching key. A missing builder is a loud KeyError, not a silent skip.
 """
 
+import json
+from datetime import date
+
 from shared import db
+from shared.ai import complete
 from shared.pipeline import step
 from shared.slides import SLIDE_IDS
-from datetime import date
-from shared.ai import complete
 
 
 def _languages(handle: str) -> dict:
@@ -135,7 +137,8 @@ def _strip_fences(text: str) -> str:
 def _coding_personality(handle: str) -> dict:
     day_rows = db.sql(
         """
-        SELECT ch.commit_date AS commit_date, SUM(ch.commit_count) AS commits
+        SELECT ch.commit_date AS commit_date,
+               CAST(SUM(ch.commit_count) AS SIGNED) AS commits
           FROM commit_history ch
           JOIN repos r ON r.id = ch.repo_id
          WHERE r.handle = :handle
@@ -145,12 +148,16 @@ def _coding_personality(handle: str) -> dict:
         """,
         {"handle": handle},
     )
+    # Every SUM/AVG needs its cast: both are DECIMAL, which the Data API hands
+    # back as a JSON string. SIGNED for the integer total, DOUBLE for the
+    # average -- SIGNED would truncate 0.0667 to 0. COUNT() is already a
+    # number. See the SUM() gotcha in CLAUDE.md.
     repo_rows = db.sql(
         """
         SELECT COUNT(*) AS repo_count,
-               SUM(is_fork) AS fork_count,
+               CAST(SUM(is_fork) AS SIGNED) AS fork_count,
                COUNT(DISTINCT primary_language) AS language_count,
-               AVG(stars) AS avg_stars
+               CAST(AVG(stars) AS DOUBLE) AS avg_stars
           FROM repos
          WHERE handle = :handle
         """,
