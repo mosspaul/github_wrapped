@@ -219,6 +219,27 @@ to this repo and branch; the second is a safety net in case GitHub rolls the
 change back. `GithubOwnerId`/`GithubRepoId` come from the GitHub API and must
 be updated if the repo ever moves.
 
+**`SUM()` comes back through the Data API as a JSON *string*, not a number.**
+MySQL types `SUM()` as DECIMAL, and `formatRecordsAs="JSON"` serialises DECIMAL
+as a quoted string to avoid losing precision. `COUNT()` is a BIGINT and stays a
+number, so a query with both looks half-broken:
+
+```
+SELECT SUM(bytes) AS summed, CAST(SUM(bytes) AS SIGNED) AS cast, COUNT(*) AS n
+  -> {"summed": "19336", "cast": 19336, "n": 5}
+```
+
+It surfaces two ways, and the quiet one is worse. Loud: `sum()` over the rows
+raises `unsupported operand type(s) for +: 'int' and 'str'`. Quiet: the value
+flows into `stats_json` as `"bytes": "19336"` and renders fine on a slide, so
+nothing looks wrong — and `max(rows, key=...)` silently compares strings, where
+`"9" > "18"`, picking the wrong "busiest day". **Do not verify this by eyeballing
+a table** — `19336` and `"19336"` print identically in a PowerShell table and in
+most pretty-printers; look at raw JSON.
+
+Fix at the source with `CAST(SUM(x) AS SIGNED)` rather than coercing in Python,
+so every consumer of the query gets a number.
+
 **Aurora engine versions differ by region.** The Data API needs 3.07+, but
 us-west-1 offers 3.08.0–3.13.0 and *no* 3.07.x. Pinned to the regional default
 `8.0.mysql_aurora.3.10.3`. Check with `aws rds describe-db-engine-versions
@@ -316,14 +337,36 @@ against a real `octocat` run: 8 repos → 6 non-fork → 5 language rows in 2.0s
 and a second run leaves 5 rows, not 10 (the per-repo `DELETE` before the batch
 insert is what keeps a language that disappeared from a repo from lingering).
 
-`commit_history` is still unpopulated, which is what keeps `commit_activity`,
-`coding_personality` and `year_in_code` on placeholder shapes; see the
-extension-point comment in `ingest-github/handler.py`.
+`ingest-github` also populates `commit_history`, from
+`/repos/{full_name}/stats/commit_activity` — 52 weeks in one call per non-fork
+repo, expanded from weekly buckets into the per-day rows the schema wants, with
+zero-commit days dropped. That endpoint answers 202 with an empty body while
+GitHub builds its cache, so `github.get_stats()` returns `None` for that and the
+handler retries the stragglers **as a group** between rounds rather than
+sleeping once per repo; it is bounded by `STATS_MAX_ROUNDS` and by the Lambda's
+own remaining time. Verified on a real `dougalcaleb` run: 15 repos → 42 language
+rows + 51 commit-day rows, 15.1s cold (GitHub's stats cache cold, retries hit)
+and 7.3s on the immediate re-run with the same counts. `octocat` returns 0
+commit rows because its repos are dormant, which is correct, not a failure.
+
+`commit_activity` and `year_in_code` are real numbers now. Two caveats worth
+knowing before quoting them on stage:
+
+- `/stats/commit_activity` counts **every contributor** to the repo, not just
+  this handle. Identical on a solo repo, overcounts on a collaborative one.
+  Per-author data means `/stats/contributors`, which is weekly-only.
+- The two slides count different windows — `commit_activity` is the last 52
+  weeks, `year_in_code` is the calendar year to date — so they legitimately
+  disagree (223 vs 71 for `dougalcaleb`). Not a bug, but it looks like one.
+
+`coding_personality` is the last placeholder; see the extension-point comment in
+`ingest-github/handler.py` for why hour-of-day needs a different source.
 
 `gh-wrapped/dev/github-pat` is populated as of 2026-08-31, so ingest runs
 authenticated at 5,000 req/hr. This matters more than it used to: a run cost 3
-GitHub calls before and now costs up to 2 + `MAX_REPOS`, which anonymous 60
-req/hr would exhaust in about three runs.
+GitHub calls before and now costs up to 2 + 2x`MAX_REPOS` (a languages call and
+a commit-stats call per non-fork repo, plus 202 retries), which anonymous 60
+req/hr would exhaust in a run or two.
 
 **The PAT is read once at import time, not per invocation**, so changing the
 secret does nothing until containers recycle — a warm one keeps serving the old
