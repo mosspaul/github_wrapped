@@ -303,6 +303,18 @@ cause except the real one; re-run `aws sts get-caller-identity` and repeat the
 test before believing them, and before concluding anyone needs to re-login.
 `botocore[crt]` in `requirements-dev.txt` is required by that provider.
 
+**Slide HTML said "2024" on stage.** The model has no way to know the real
+current date — its training cutoff is well behind whenever the Lambda actually
+runs — so `generate-slides` left to itself drifted to a plausible-but-stale
+year when a slide's copy referenced "this year" or a year number. Fixed two
+ways, both in `lambdas/py`: `generate-slides/handler.py`'s `SYSTEM` prompt now
+states the real UTC date and year explicitly and tells the model never to
+recall a year from memory; `compute-stats/handler.py`'s `_year_in_code` now
+puts an explicit `"year"` field in the stats it writes, so the slide has a real
+number to use instead of inferring "this year" itself. Same failure mode would
+hit any future prompt that asks the model to reason about "now" — give it the
+date, don't assume it knows.
+
 ## Conventions
 
 - Named SQL parameters always (`:handle`), never string interpolation.

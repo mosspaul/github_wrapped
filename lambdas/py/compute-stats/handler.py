@@ -249,9 +249,10 @@ def _year_in_code(handle: str) -> dict:
     # row, so `activity_rows` is never empty even with no commit_history at all
     # (it comes back as {"total_commits": null, "repos_edited": 0}).
     if not repo_rows:
-        return {"repos_created_this_year": 0, "repos_edited_this_year": 0, "total_commits": 0}
+        return {"year": date.today().year, "repos_created_this_year": 0, "repos_edited_this_year": 0, "total_commits": 0}
 
     return {
+        "year": date.today().year,
         "repos_created_this_year": repo_rows[0]["repos_created"],
         "repos_edited_this_year": activity.get("repos_edited"),
         "total_commits": activity.get("total_commits"),
