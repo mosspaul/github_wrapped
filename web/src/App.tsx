@@ -7,6 +7,7 @@
  */
 import { useState } from 'react';
 import { runWrapped, type JobStatus, type WrappedPayload } from './api';
+import SlideCarousel from './Carousel';
 
 const PHASE_LABEL: Record<JobStatus, string> = {
   pending: 'Queued...',
@@ -66,26 +67,7 @@ export default function App() {
         <>
           <h2>{data.user.displayName ?? data.user.handle}</h2>
 
-          <h3>Generated slides</h3>
-          <div style={{ display: 'flex', gap: '1rem', overflowX: 'auto', paddingBottom: '1rem' }}>
-            {data.slides.map((slide) =>
-              slide.html ? (
-                // Safe only because this HTML comes from our own Bedrock call
-                // with our own prompt. Never render user-supplied HTML here.
-                <div
-                  key={slide.slideType}
-                  className="slide-preview"
-                  dangerouslySetInnerHTML={{ __html: slide.html }}
-                />
-              ) : (
-                <div key={slide.slideType} className="slide-preview">
-                  <p className="muted" style={{ padding: '1rem' }}>
-                    {slide.title}: no HTML generated
-                  </p>
-                </div>
-              ),
-            )}
-          </div>
+          <SlideCarousel data={{slides: data.slides}}/>
 
           <h3>Raw payload</h3>
           <pre>{JSON.stringify(data, null, 2)}</pre>
