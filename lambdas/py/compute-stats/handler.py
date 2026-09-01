@@ -15,24 +15,23 @@ from shared.slides import SLIDE_IDS
 
 
 def _languages(handle: str) -> dict:
+    # Bytes, not repo count -- "language breakdown by bytes written" is what
+    # slide-types.json promises and what CONTRACTS.md documents. Forks are
+    # excluded here as well as in ingest, so this stays right even if an older
+    # run left fork rows in repo_languages.
     rows = db.sql(
         """
-        SELECT r.primary_language AS language, COUNT(*) AS repo_count,
-               SUM(r.stars) AS stars
-          FROM repos r
-         WHERE r.handle = :handle
-           AND r.primary_language IS NOT NULL
-           AND r.is_fork = 0
-         GROUP BY r.primary_language
-         ORDER BY repo_count DESC
+        SELECT rl.language, SUM(rl.bytes) AS bytes, COUNT(*) AS repo_count
+          FROM repo_languages rl
+          JOIN repos r ON r.id = rl.repo_id
+         WHERE r.handle = :handle AND r.is_fork = 0
+         GROUP BY rl.language
+         ORDER BY bytes DESC
          LIMIT 8
         """,
         {"handle": handle},
     )
-    # NOTE: this counts repos per language, not bytes. Once ingest populates
-    # repo_languages, switch to SUM(bytes) -- that is the number the slide
-    # copy actually promises.
-    return {"top": rows, "basis": "repo_count"}
+    return {"top": rows, "basis": "bytes"}
 
 
 def _standout_projects(handle: str) -> dict:

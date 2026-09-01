@@ -18,6 +18,11 @@ RESOURCE_ARN = os.environ["DB_CLUSTER_ARN"]
 SECRET_ARN = os.environ["DB_SECRET_ARN"]
 DATABASE = os.environ.get("DB_NAME", "gh_wrapped")
 
+# The Data API caps a batch by total payload size rather than a documented row
+# count, so this is a conservative chunk that keeps any realistic row well clear
+# of the limit rather than a number lifted from the docs.
+_BATCH_SIZE = 250
+
 
 def _to_field(value: Any) -> dict:
     if value is None:
@@ -63,6 +68,34 @@ def sql(statement: str, params: dict[str, Any] | None = None) -> list[dict]:
     # Absent for statements that return no rows (INSERT/UPDATE/DDL). Not an error.
     raw = res.get("formattedRecords")
     return json.loads(raw) if raw else []
+
+
+def sql_batch(statement: str, param_sets: list[dict[str, Any]]) -> None:
+    """
+    Run one statement once per parameter set, in a single Data API call.
+
+        sql_batch("DELETE FROM repo_languages WHERE repo_id = :repo_id",
+                  [{"repo_id": 1}, {"repo_id": 2}])
+
+    Use this instead of looping over sql() whenever the same statement runs per
+    row: ingesting one prolific user's languages is ~150 rows, which is 150
+    HTTPS round trips as a loop and one or two as a batch.
+
+    Returns nothing -- batch_execute_statement does not return result rows, only
+    generated fields, which no caller here needs.
+    """
+    for start in range(0, len(param_sets), _BATCH_SIZE):
+        chunk = param_sets[start : start + _BATCH_SIZE]
+        _client.batch_execute_statement(
+            resourceArn=RESOURCE_ARN,
+            secretArn=SECRET_ARN,
+            database=DATABASE,
+            sql=statement,
+            parameterSets=[
+                [{"name": name, "value": _to_field(value)} for name, value in ps.items()]
+                for ps in chunk
+            ],
+        )
 
 
 def set_status(handle: str, status: str, error: str | None = None) -> None:

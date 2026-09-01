@@ -72,6 +72,14 @@ invocations, **a raised exception goes nowhere a user can see** — writing
 `status='error'` is the only way a failure surfaces. `shared/pipeline.py`'s
 `@step` decorator handles that; use it rather than hand-rolling try/except.
 
+**The only channel between steps is the database.** `invoke_next` forwards
+`{"handle": ...}` and nothing else, and an async invoke discards the return
+value, so anything a step computes in memory and does not write to a table is
+gone. `ingest-github` fetches and stores; `compute-stats` is where rows become
+stats. A derived number computed in the ingest step is dead code — this has
+already happened once, with a whole language/star/vibe summary that nothing
+could read.
+
 All writes are upserts, so any handle can be re-run from scratch. `POST
 /wrapped/{handle}` short-circuits that: if the handle is already
 `status='ready'`, it returns immediately without touching the pipeline at all
@@ -261,10 +269,15 @@ Always pass `--region us-west-1` explicitly, or `aws configure set region
 us-west-1` once for this machine.
 
 **The account's root `login_session` credential provider refreshes
-unreliably** — long-polling calls (CloudFormation waiters) fail intermittently
-with `CreateOAuth2Token ... authorization grant is invalid`. It has silently
-corrupted test results before. If AWS results look self-contradictory, re-run
-`aws sts get-caller-identity` and repeat the test before believing them.
+unreliably** — calls fail intermittently with `CreateOAuth2Token ...
+authorization grant is invalid, expired, revoked, or malformed`. Not just
+long-polling ones: it has also hit a plain `push-fn.py` upload and a bare
+`aws sts get-caller-identity`, twice in a row, on credentials that were
+completely valid — the very next call succeeded with nothing changed in
+between. It has silently corrupted test results before. **Two consecutive
+failures are not proof the session is dead**, and that error text names every
+cause except the real one; re-run `aws sts get-caller-identity` and repeat the
+test before believing them, and before concluding anyone needs to re-login.
 `botocore[crt]` in `requirements-dev.txt` is required by that provider.
 
 ## Conventions
@@ -295,6 +308,23 @@ database happened to return. Bedrock logs real token usage against
 concurrent and effort-capped; a repeat run of an already-`ready` handle
 returns in a couple seconds via the `POST /wrapped/{handle}` fast path. See
 the "Lambda timeout can orphan a job" gotcha above for what this replaced.
+
+`ingest-github` populates `repo_languages` too (one
+`/repos/{full_name}/languages` call per non-fork repo, capped by `MAX_REPOS`),
+so the `languages` slide is real byte totals rather than a repo count. Verified
+against a real `octocat` run: 8 repos → 6 non-fork → 5 language rows in 2.0s,
+and a second run leaves 5 rows, not 10 (the per-repo `DELETE` before the batch
+insert is what keeps a language that disappeared from a repo from lingering).
+
+`commit_history` is still unpopulated, which is what keeps `commit_activity`,
+`coding_personality` and `year_in_code` on placeholder shapes; see the
+extension-point comment in `ingest-github/handler.py`.
+
+**The GitHub PAT secret is not populated**, so ingest runs anonymously at 60
+req/hr (`github.py` logs a loud WARNING per cold start). That was survivable
+when a run cost 3 API calls; a run now costs up to 2 + `MAX_REPOS`, so ~3 runs
+an hour before the limit bites. Populate `gh-wrapped/dev/github-pat` before
+demoing to a room full of people typing handles.
 
 All five stacks are deployed. The site is live at
 `https://main.d2uskcsztnslls.amplifyapp.com`, serving the real API URL and with
