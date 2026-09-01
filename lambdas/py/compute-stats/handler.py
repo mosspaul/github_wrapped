@@ -13,6 +13,7 @@ from shared import db
 from shared.pipeline import step
 from shared.slides import SLIDE_IDS
 from datetime import date
+from shared.ai import complete
 
 
 def _languages(handle: str) -> dict:
@@ -90,10 +91,123 @@ def _commit_activity(handle: str) -> dict:
     }
 
 
+
+_PERSONALITY_SYSTEM = """You invent a short, playful "coding personality" archetype \
+for a GitHub Wrapped slide, based ONLY on the aggregate stats you're given.
+
+Rules:
+- Use ONLY the numbers provided. Never claim to know commit time-of-day, commit \
+messages, code content, or anything not in the stats -- if a signal is null, \
+just don't make a claim about it.
+- Return ONLY a JSON object, no markdown fences, no explanation, in this exact \
+shape: {"archetype": "<2-4 word playful title>", "traits": ["<short phrase>", ...]}
+- traits should be 3 short, punchy phrases (a few words each), grounded in the \
+actual numbers.
+- Keep it fun and complimentary, never mean-spirited."""
+
+
+
+def _personality_prompt(handle: str, signals: dict) -> str:
+    return (
+        f"GitHub handle: {handle}\n\n"
+        f"Signals (JSON):\n{json.dumps(signals, indent=2)}\n\n"
+        "Generate the coding personality archetype."
+    )
+
+
+def _strip_fences(text: str) -> str:
+    # SYSTEM says no fences, but models don't always obey.
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    return text.strip()
+
+
+
+
 def _coding_personality(handle: str) -> dict:
-    # PLACEHOLDER -- the interesting version reads commit timestamps and
-    # derives an archetype (night owl, weekend warrior, ...).
-    return {"placeholder": True, "archetype": "Unknown", "traits": []}
+    day_rows = db.sql(
+        """
+        SELECT ch.commit_date AS commit_date, SUM(ch.commit_count) AS commits
+          FROM commit_history ch
+          JOIN repos r ON r.id = ch.repo_id
+         WHERE r.handle = :handle
+         GROUP BY ch.commit_date
+        HAVING SUM(ch.commit_count) > 0
+         ORDER BY ch.commit_date
+        """,
+        {"handle": handle},
+    )
+    repo_rows = db.sql(
+        """
+        SELECT COUNT(*) AS repo_count,
+               SUM(is_fork) AS fork_count,
+               COUNT(DISTINCT primary_language) AS language_count,
+               AVG(stars) AS avg_stars
+          FROM repos
+         WHERE handle = :handle
+        """,
+        {"handle": handle},
+    )
+
+    repo_stats = repo_rows[0] if repo_rows else {}
+
+    signals = {
+        "repo_count": repo_stats.get("repo_count") or 0,
+        "fork_count": repo_stats.get("fork_count") or 0,
+        "language_count": repo_stats.get("language_count") or 0,
+        "avg_stars": round(repo_stats.get("avg_stars") or 0, 1),
+    }
+
+    if day_rows:
+        total_commits = sum(r["commits"] for r in day_rows)
+        weekend_commits = sum(
+            r["commits"]
+            for r in day_rows
+            if date.fromisoformat(r["commit_date"]).weekday() >= 5  # Sat=5, Sun=6
+        )
+        first_day = date.fromisoformat(day_rows[0]["commit_date"])
+        last_day = date.fromisoformat(day_rows[-1]["commit_date"])
+        span_days = (last_day - first_day).days + 1
+
+        signals.update(
+            {
+                "total_commits": total_commits,
+                "active_days": len(day_rows),
+                "weekend_commit_pct": round(100 * weekend_commits / total_commits, 1),
+                "consistency_ratio": round(len(day_rows) / span_days, 2),
+            }
+        )
+    else:
+        signals.update(
+            {
+                "total_commits": 0,
+                "active_days": 0,
+                "weekend_commit_pct": None,
+                "consistency_ratio": None,
+            }
+        )
+
+    try:
+        raw = complete(_PERSONALITY_SYSTEM, _personality_prompt(handle, signals), max_tokens=10000)
+        parsed = json.loads(_strip_fences(raw))
+        archetype = parsed.get("archetype")
+        traits = parsed.get("traits")
+
+        if not isinstance(archetype, str) or not isinstance(traits, list):
+            raise ValueError(f"unexpected shape from model: {parsed!r}")
+        return {"archetype": archetype, "traits": [str(t) for t in traits][:5]}
+
+    except Exception as exc:
+        # Fail soft -- see note above re: pipeline.py's step decorator killing
+        # the whole job (and generate-slides) on any uncaught exception here.
+        print(f"coding_personality AI call failed for {handle}: {exc!r}")
+        return {"archetype": "Unknown", "traits": [], "placeholder": True}
+
+
 
 
 def _year_in_code(handle: str) -> dict:
