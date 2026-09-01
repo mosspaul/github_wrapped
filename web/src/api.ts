@@ -58,8 +58,18 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export const startWrapped = (handle: string) =>
-  req<{ handle: string; status: JobStatus }>(`/wrapped/${handle}`, { method: 'POST' });
+/**
+ * Start a run. `refresh` forces the pipeline to re-run even when this handle
+ * is already `ready` -- without it the API short-circuits and returns the
+ * stored deck untouched (see CONTRACTS.md). Use it when the data is stale or
+ * the pipeline changed; leave it off for a repeat demo, which is the whole
+ * point of the fast path.
+ */
+export const startWrapped = (handle: string, refresh = false) =>
+  req<{ handle: string; status: JobStatus }>(
+    `/wrapped/${handle}${refresh ? '?refresh=true' : ''}`,
+    { method: 'POST' },
+  );
 
 export const getStatus = (handle: string) =>
   req<StatusResponse>(`/wrapped/${handle}/status`);
@@ -87,9 +97,21 @@ const TERMINAL: JobStatus[] = ['ready', 'error'];
 export async function runWrapped(
   handle: string,
   onProgress?: (status: JobStatus) => void,
-  { intervalMs = 2000, timeoutMs = 1_200_000 }: { intervalMs?: number; timeoutMs?: number } = {},
+  {
+    intervalMs = 2000,
+    timeoutMs = 1_200_000,
+    refresh = false,
+  }: { intervalMs?: number; timeoutMs?: number; refresh?: boolean } = {},
 ): Promise<WrappedPayload> {
-  await startWrapped(handle);
+  const started = await startWrapped(handle, refresh);
+
+  // An already-`ready` handle comes back ready from the POST itself, with no
+  // run started. Returning here keeps that path near-instant instead of
+  // sleeping a full poll interval to re-learn what we were just told.
+  if (started.status === 'ready') {
+    onProgress?.('ready');
+    return getWrapped(handle);
+  }
 
   const deadline = Date.now() + timeoutMs;
 

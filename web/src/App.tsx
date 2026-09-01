@@ -20,6 +20,7 @@ const PHASE_LABEL: Record<JobStatus, string> = {
 
 export default function App() {
   const [handle, setHandle] = useState('octocat');
+  const [refresh, setRefresh] = useState(false);
   const [phase, setPhase] = useState<JobStatus | null>(null);
   const [data, setData] = useState<WrappedPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +33,7 @@ export default function App() {
     setData(null);
     setPhase('pending');
     try {
-      setData(await runWrapped(handle.trim(), setPhase));
+      setData(await runWrapped(handle.trim(), setPhase, { refresh }));
       setPhase('ready');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -48,16 +49,31 @@ export default function App() {
         and dumps the raw payload.
       </p>
 
-      <form onSubmit={go} style={{ display: 'flex', gap: '0.5rem', margin: '1.5rem 0' }}>
-        <input
-          value={handle}
-          onChange={(e) => setHandle(e.target.value)}
-          placeholder="github handle"
-          disabled={running}
-        />
-        <button type="submit" disabled={running || !handle.trim()}>
-          {running ? 'Working...' : 'Run'}
-        </button>
+      <form onSubmit={go} style={{ margin: '1.5rem 0' }}>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <input
+            value={handle}
+            onChange={(e) => setHandle(e.target.value)}
+            placeholder="github handle"
+            disabled={running}
+          />
+          <button type="submit" disabled={running || !handle.trim()}>
+            {running ? 'Working...' : 'Run'}
+          </button>
+        </div>
+
+        <label
+          className="muted"
+          style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.6rem' }}
+        >
+          <input
+            type="checkbox"
+            checked={refresh}
+            onChange={(e) => setRefresh(e.target.checked)}
+            disabled={running}
+          />
+          Force re-run (ignore the cached deck; takes ~30s instead of ~2s)
+        </label>
       </form>
 
       {phase && !error && <p>{PHASE_LABEL[phase]}</p>}
