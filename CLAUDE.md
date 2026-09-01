@@ -320,11 +320,25 @@ insert is what keeps a language that disappeared from a repo from lingering).
 `coding_personality` and `year_in_code` on placeholder shapes; see the
 extension-point comment in `ingest-github/handler.py`.
 
-**The GitHub PAT secret is not populated**, so ingest runs anonymously at 60
-req/hr (`github.py` logs a loud WARNING per cold start). That was survivable
-when a run cost 3 API calls; a run now costs up to 2 + `MAX_REPOS`, so ~3 runs
-an hour before the limit bites. Populate `gh-wrapped/dev/github-pat` before
-demoing to a room full of people typing handles.
+`gh-wrapped/dev/github-pat` is populated as of 2026-08-31, so ingest runs
+authenticated at 5,000 req/hr. This matters more than it used to: a run cost 3
+GitHub calls before and now costs up to 2 + `MAX_REPOS`, which anonymous 60
+req/hr would exhaust in about three runs.
+
+**The PAT is read once at import time, not per invocation**, so changing the
+secret does nothing until containers recycle — a warm one keeps serving the old
+value and `github.py`'s "PAT is unset" WARNING only prints on a cold start, so
+its absence from a warm invocation proves nothing either way. After updating
+the secret, force new containers and check that a cold start
+(`INIT_START` in the logs) has no WARNING after it:
+
+```bash
+aws lambda update-function-configuration --region us-west-1 \
+  --function-name gh-wrapped-dev-ingest-github --description "pat refresh"
+```
+
+`ingest-github` is the only function with `GITHUB_PAT_SECRET_ARN`, so it is the
+only one that needs this.
 
 All five stacks are deployed. The site is live at
 `https://main.d2uskcsztnslls.amplifyapp.com`, serving the real API URL and with
